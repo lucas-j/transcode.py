@@ -177,7 +177,10 @@ def _last_name_first(name):
     '''Reverses the order of full names of people, so their last name
     appears first.'''
     names = name.split()
-    return u' '.join((names[-1], ' '.join(names[:-1]))).strip()
+    if len(names) == 0:
+        return names
+    else:
+        return u' '.join((names[-1], ' '.join(names[:-1]))).strip()
 
 def _sanitize(filename, repl = None):
     '''Replaces any invalid characters in the filename with repl. Invalid
@@ -1540,7 +1543,7 @@ class WTVSource(Source):
     def _fetch_metadata(self):
         'Obtains any metadata which might be embedded in the WTV.'
         logging.info('*** Fetching metadata for %s ***' % self.wtv)
-        val = '\s*:\s*(.*)\s$'
+        val = '\s*:\s*(.*)$'
         tags = []
         tags.append((re.compile('service_provider' + val), 'channel'))
         tags.append((re.compile('service_name' + val), 'channel'))
@@ -1565,9 +1568,9 @@ class WTVSource(Source):
                     if match:
                         self.meta_present = True
                         if type(tag[1]) == type(str()):
-                            self[tag[1]] = match.group(1)
+                            self[tag[1]] = match.group(1).strip()
                         else:
-                            tag[1](match.group(1))
+                            tag[1](match.group(1).strip())
             proc.wait()
         except OSError:
             raise RuntimeError('FFmpeg is not installed.')
