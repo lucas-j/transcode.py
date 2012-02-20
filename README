@@ -1,0 +1,89 @@
+This program uses a MythTV database or WTV recording to transcode
+recorded TV programs to MPEG-4 video using the H.264 and AAC codecs, cutting
+the video at certain commercial points selected by the user within MythTV's
+frontend or by an automatic commercial flagger, complete with SRT subtitles
+extracted from the embedded VBI closed-caption data, and iTunes-style
+metadata about the program, if it can be found.
+
+In short, this program calls a bunch of programs to convert a file like
+1041_20100523000000.mpg or Program Name_ABC_2010_05_23_00_00_00.wtv into a
+file like /srv/video/Program Name/Program Name - Episode Name.mp4,
+including captions, file tags, chapters, and with commercials removed.
+
+This program has been tested on Windows, Linux and FreeBSD, and can optionally
+transcode from remote sources - e.g., mythbackend / MySQL running on a
+different computer, or WTV source files from a remote SMB share / HomeGroup.
+
+Requirements:
+- FFmpeg
+- x264 (ffmpeg will be called with -vcodec libx264)
+- neroAacEnc (http://www.nero.com/enu/technologies-aac-codec.html)
+- Project-X and a suitable JVM (http://project-x.sourceforge.net)
+- remuxTool.jar for WTV (http://babgvant.com/downloads/dburckh/remuxTool.jar)
+- MP4Box (http://gpac.sourceforge.net)
+- ccextractor (http://ccextractor.sourceforge.net)
+- AtomicParsley (https://bitbucket.org/wez/atomicparsley)
+- Python 2.6+ (http://www.python.org)
+  - lxml (http://lxml.de)
+  - mysql-python (http://sourceforge.net/projects/mysql-python)
+  - the MythTV Python bindings (if MythTV is not installed already)
+
+Most of these packages can usually be found in various Linux software
+repositories or as pre-compiled Windows binaries.
+
+Setup:
+- Make sure the above dependencies are installed on your system. Add each
+  binary location to your PATH variable if necessary.
+- Change the default values within transcode.py, or specify appropriate
+  command-line options.
+
+Usage:
+  transcode.py %CHANID% %STARTTIME%
+  transcode.py /path/to/file.wtv
+See transcode.py --help for more details
+
+Notes on format string:
+Each of the below tags are replaced with the respective metadata obtained
+from MythTV, the WTV file, or Tvdb, if it can be found. Path separators
+(slashes) indicate that new directories are to be created if necessary.
+  %T - title (name of the show)
+  %S - subtilte (name of the episode)
+  %R - description (short plot synopsis)
+  %C - category (genre of the show)
+  %n - episode production code (or %s%e if unavailable)
+  %s - season number
+  %E - episode number (as reported by Tvdb)
+  %e - episode number, padded with zeroes if necessary
+  %r - content rating (e.g., TV-G)
+  %oy - year of original air date (two digits)
+  %oY - year of original air date (full four digits)
+  %om - month of original air date (two digits)
+  %od - day of original air date (two digits)
+  
+Special thanks to:
+- #MythTV Freenode
+- wagnerrp, the maintainer of the Python MythTV bindings
+- Project-X team
+
+Changelog:
+1.1 - support for multiple audio streams, Comskip
+1.0 - initial release
+
+TODO:
+- use a custom exception
+- check for adequate disk space on /tmp and destination partitions
+- generate thumbnail if necessary
+- better genre interpretation for WTV files
+
+Long-term goals:
+- support for boxed-set TV seasons on DVD
+- .dvr-ms support
+- metadata / chapter support for as many different players as possible,
+  especially Windows Media Player
+- optionally use Matroska / VP8 as a target format
+- easier access and configuration
+- easier installation: all required programs should be bundled
+
+Known issues:
+- subtitles seem to be out-of-sync when played with MPlayer, works in vlc
+- subtitle font is sometimes too large on QuickTime / iTunes / iPods
