@@ -944,7 +944,7 @@ class Transcoder:
                 size = ['-s', '640x%d' % vres, '-vf',
                         'pad=640:480:0:%d:black' % pad]
             else:
-                hres = int(round(480.0 / aspect))
+                hres = int(round(480.0 * aspect))
                 if hres % 2 == 1:
                     hres += 1
                 pad = (640 - hres) / 2
