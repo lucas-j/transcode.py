@@ -100,7 +100,7 @@ import MythTV, MythTV.ttvdb.tvdb_api, MythTV.ttvdb.tvdb_exceptions
 # --- Change these default values before using this program ---
 
 # directory to store encoded video file
-_OUT_DEFAULT = '/srv/video'
+_OUT_DEFAULT = 'E:\\Media\\Video'
 
 # temporary directory to use while encoding
 # (if left as None, a temporary directory will be created)
@@ -116,7 +116,7 @@ _FMT_DEFAULT = '%T/%T - %S'
 _LANG_DEFAULT = 'en'
 
 # MythTV database host (change this if using MythTV)
-_HOST_DEFAULT = '127.0.0.1'
+_HOST_DEFAULT = '192.168.1.12'
 
 # MySQL database for MythTV (usually 'mythconverg')
 _DB_DEFAULT = 'mythconverg'
@@ -128,10 +128,10 @@ _USER_DEFAULT = 'mythtv'
 _PASS_DEFAULT = 'mythtv'
 
 # path to the Project-X JAR file (used for noise cleaning / cutting)
-_PROJECTX_DEFAULT = 'project-x/ProjectX.jar'
+_PROJECTX_DEFAULT = 'C:\\Apps\\Project-X\\ProjectX.jar'
 
 # path to remuxTool.jar (used for extracting MPEG-2 data from WTV files)
-_REMUXTOOL_DEFAULT = 'remuxTool.jar'
+_REMUXTOOL_DEFAULT = 'C:\\Apps\\remuxTool\\remuxTool.jar'
 
 def _clean(filename):
     'Removes the file if it exists.'
@@ -682,6 +682,7 @@ class Transcoder:
     '''Invokes tools necessary to extract, split, demux, encode, remux and
     finalize the media into MPEG-4 format.'''
     seg = 0
+    _demuxed = []
     _demux_v = None
     _demux_a = None
     _frames = 0
@@ -691,13 +692,11 @@ class Transcoder:
     def __init__(self, source, opts):
         self.source = source
         self.opts = opts
+        self._join = source.base + '-join.ts'
         self._demux = source.base + '-demux'
         self._wav = source.base + '.wav'
         self._h264 = source.base + '.h264'
         self._aac = source.base + '.aac'
-        self._xcl = source.base + '.Xcl'
-        self._xcl_data = StringIO.StringIO()
-        self._xcl_data.write('CollectionPanel.CutMode=0\n')
         self.subtitles = Subtitles(source)
         self.chapters = Chapters(source)
         self.metadata = Metadata(source)
@@ -785,117 +784,35 @@ class Transcoder:
         match = re.match('^([0-9]+\.[0-9]+)', ver)
         if match and float(match.group(1)) <= 0.7:
             args = ['-acodec', 'copy', '-vcodec', 'copy',
-                    '-f', 'mpeg', 'pipe:']
-            for astream in xrange(1, len(self.source.astreams)):
+                    '-f', 'mpegts']
+            for astream in xrange(1, self.source.astreams):
                 args += ['-acodec', 'copy', '-newaudio']
-            for vstream in xrange(1, len(self.source.vstreams)):
+            for vstream in xrange(1, self.source.vstreams):
                 args += ['-vcodec', 'copy', '-newvideo']
         else:
             args = ['-map', '0:v', '-map', '0:a', '-c', 'copy',
-                    '-f', 'mpeg', 'pipe:']
+                    '-f', 'mpegts']
         return args
     
-    def _count_frames(self, pipe):
-        '''Obtains the frame count for a video file from the ffmpeg stderr
-        pipe within a separate thread while video data is read from stdout
-        by the main thread.'''
-        frames = 0
-        regex = re.compile('frame=([0-9]+)(?!.*frame)')
-        for line in pipe:
-            if self.opts.verbose:
-                logging.debug(line.replace('\n', ''))
-            match = re.search(regex, line)
-            if match:
-                frames = int(match.group(1))
-        self._frames = frames
-    
-    def _compensate(self, block = 1024 * 4096):
-        '''Some video files include extra VBI data which can throw off
-        cutpoint calculations, resulting in inaccurate commercial cuts.
-        To compensate for this, the video is remuxed using ffmpeg while
-        preserving as much data as possible, and the data is counted
-        block bytes at a time while the frame count is obtained through
-        the status output in another thread.'''
-        bc = 0
-        args = ['ffmpeg', '-y', '-i', self.source.orig] + self._split_args
-        logging.info('*** Indexing video ***')
-        logging.debug('$ %s' % u' '.join(args))
-        proc = subprocess.Popen(args, stdout = subprocess.PIPE,
-                                stderr = subprocess.PIPE)
-        thr = threading.Thread(target = self._count_frames,
-                               args = ([proc.stderr]))
-        thr.start()
-        data = proc.stdout.read(block)
-        bc += len(data)
-        while data:
-            data = proc.stdout.read(block)
-            bc += len(data)
-        self._extra = os.stat(self.source.orig).st_size - bc
-        thr.join()
-        proc.wait()
-        if proc.returncode != 0:
-            raise RuntimeError('Unexpected return code', u' '.join(args),
-                               proc.returncode)
-        logging.debug('Frames: %d, extra bytes: %d' %
-                      (self._frames, self._extra))
-    
-    def _frame_to_bytecode(self, frame, block = 1024 * 4096):
-        '''Obtains the byte offset into a video file of a particular frame
-        number by invoking ffmpeg to remux the entire file to that point
-        and checking the resulting filesize by reading the data block bytes
-        at a time, compensating for any potential lost data.'''
-        bc = 0
-        with open(os.devnull, 'w') as devnull:
-            args = ['ffmpeg', '-y', '-i', self.source.orig, '-vframes',
-                    str(frame)] + self._split_args
-            logging.debug('$ %s' % u' '.join(args))
-            proc = subprocess.Popen(args, stdout = subprocess.PIPE,
-                                    stderr = devnull)
-            data = proc.stdout.read(block)
-            bc = len(data)
-            while data:
-                data = proc.stdout.read(block)
-                bc += len(data)
-            proc.wait()
-            if proc.returncode != 0:
-                raise RuntimeError('Unexpected return code', u' '.join(args),
-                                   proc.returncode)
-        if self._extra > 0 and self._frames > 0:
-            bc = int(round(bc + self._extra * 1. / self._frames * frame))
-        return bc
-    
     def _extract(self, clip, elapsed):
-        '''Creates a new chapter marker at elapsed and adds an entry in the
-        Project-X cutlist for clip. All values are in seconds.'''
-        logging.info('*** Locating segment %d: [%s - %s] ***' %
+        '''Creates a new chapter marker at elapsed and uses ffmpeg to extract
+        an MPEG-TS video clip from clip[0] to clip[1]. All values are
+        in seconds.'''
+        logging.info('*** Extracting segment %d: [%s - %s] ***' %
                      (self.seg, _seconds_to_time(clip[0]),
                       _seconds_to_time(clip[1])))
         self.chapters.add(elapsed, self.seg)
-        frame = (int(round(clip[0] * self.source.fps)),
-                 int(round(clip[1] * self.source.fps)))
-        self._xcl_data.write('%d\n' % self._frame_to_bytecode(frame[0]))
-        self._xcl_data.write('%d\n' % self._frame_to_bytecode(frame[1]))
+        args = ['ffmpeg', '-y', '-i', self.source.orig, '-ss', str(clip[0]),
+                '-t', str(clip[1] - clip[0])] + self._split_args
+        args += ['%s-%d.ts' % (self.source.base, self.seg)]
+        _cmd(args)
         self.seg += 1
-    
-    def _find_split(self):
-        'Uses the Project-X log to obtain the clipped / filtered video file.'
-        with open('%s_log.txt' % self.source.base, 'r') as log:
-            regex = re.compile('.*new File:\s+(.*)\s*$')
-            for line in log:
-                match = re.search(regex, line)
-                if match:
-                    self._split = match.group(1)
     
     def split(self):
         '''Uses the source's cutlist to mark specific video clips from the
-        source video for extraction while also setting chapter markers and
-        obtaining subtitles, and then invokes Project-X to split and join
-        the source video.'''
-        pos = 0
-        elapsed = 0
-        self.subtitles.clean_tmp()
+        source video for extraction while also setting chapter markers.'''
+        (pos, elapsed) = (0, 0)
         self._split_args = self._check_split_args()
-        self._compensate()
         for cut in self.source.cutlist:
             (start, end) = cut
             if start > self.opts.thresh and start > pos:
@@ -907,26 +824,73 @@ class Transcoder:
             elapsed += self.source.duration - pos
             pos = self.source.duration
         self.chapters.add(elapsed, None)
-        logging.debug('Xcl cutlist:')
-        logging.debug(self._xcl_data.getvalue())
-        with open(self._xcl, 'w') as xcl:
-            xcl.write(self._xcl_data.getvalue())
-        name = os.path.split(self.source.base)[-1]
-        if len(self.source.cutlist) > 0:
-            logging.info('*** Clipping commercials from video ***')
-        try:
-            _cmd(['java', '-jar', self.opts.projectx, '-out', self.opts.tmp,
-                  '-name', name, '-cut', self._xcl, '-filter',
-                  self.source.orig])
-        except RuntimeError:
-            raise RuntimeError('Could not split video.')
-        self._find_split()
-        if not os.path.exists(self._split):
-            raise RuntimeError('Could not locate split video.')
-        self.subtitles.extract(self._split)
+    
+    def join(self):
+        '''Uses ffmpeg's concat: protocol to rejoin the previously split
+        video clips, and then extracts subtitles from the resulting video.'''
+        logging.info('*** Joining video to %s ***' % self._join)
+        self.subtitles.clean_tmp()
+        concat = 'concat:'
+        for seg in xrange(0, self.seg):
+            name = '%s-%d.ts' % (self.source.base, seg)
+            if os.path.exists(name):
+                concat += '%s|' % name
+            else:
+                raise RuntimeError('Could not find video segment %s.' % name)
+        concat = concat[:-1]
+        args = ['ffmpeg', '-y', '-i', concat] + self._split_args
+        args += [self._join]
+        _cmd(args)
+        self.subtitles.extract(self._join)
+    
+    def _find_streams(self):
+        '''Locates the PID numbers of the video and audio streams to be encoded
+        using ffmpeg.'''
+        (vstreams, astreams) = ([], [])
+        stream = 'Stream.*\[0x([0-9a-fA-F]+)\].*'
+        videoRE = re.compile(stream + 'Video:.*\s+([0-9]+)x([0-9]+)')
+        audioRE = re.compile(stream + ':\s*Audio')
+        proc = subprocess.Popen(['ffmpeg', '-i', self._join],
+                                stdout = subprocess.PIPE,
+                                stderr = subprocess.STDOUT)
+        for line in proc.stdout:
+            match = re.search(videoRE, line)
+            if match:
+                enabled = False
+                if re.search('Video:.*\(Main\)', line):
+                    logging.debug('Found video stream 0x%s' %
+                                  match.group(1))
+                    enabled = True
+                vstreams += [(int(match.group(1), 16), enabled)]
+            match = re.search(audioRE, line)
+            if match:
+                enabled = False
+                pid = int(match.group(1), 16)
+                match = re.search('\]\(([A-Za-z]+)\)', line)
+                if match:
+                    if match.group(1) == _iso_639_2(self.opts.language):
+                        logging.debug('Found audio stream 0x%s' %
+                                      match.group(1))
+                        enabled = True
+                astreams += [(pid, enabled)]
+            proc.wait()
+        if len(vstreams) == 0:
+            raise RuntimeError('No video streams could be found.')
+        if len(astreams) == 0:
+            raise RuntimeError('No audio streams could be found.')
+        if len([vid[0] for vid in vstreams if vid[1]]) == 0:
+            logging.debug('No detected video streams, enabling %s' %
+                          hex(vstreams[0][0]))
+            vstreams[0] = (vstreams[0][0], True)
+        if len([aud[0] for aud in astreams if aud[1]]) == 0:
+            logging.debug('No detected audio streams, enabling %s' %
+                          hex(astreams[0][0]))
+            astreams[0] = (astreams[0][0], True)
+        return vstreams, astreams
     
     def _find_demux(self):
         'Uses the Project-X log to obtain the separated video / audio files.'
+        (vstreams, astreams) = self._find_streams()
         with open('%s_log.txt' % self._demux, 'r') as log:
             videoRE = re.compile('Video: PID 0x([0-9A-Fa-f]+)')
             audioRE = re.compile('Audio: PID 0x([0-9A-Fa-f]+)')
@@ -939,26 +903,28 @@ class Transcoder:
                 if match:
                     found_v += 1
                     pid = int(match.group(1), 16)
-                    for vid in self.source.vstreams:
+                    for vid in vstreams:
                         if vid[0] == pid and vid[1]:
                             targ_v = found_v
                 match = re.search(audioRE, line)
                 if match:
                     found_a += 1
                     pid = int(match.group(1), 16)
-                    for aud in self.source.astreams:
+                    for aud in astreams:
                         if aud[0] == pid and aud[1]:
                             targ_a = found_a
                 if re.match('\.Video ', line):
-                    if curr_v == targ_v:
-                        match = re.search(fileRE, line)
-                        if match:
+                    match = re.search(fileRE, line)
+                    if match:
+                        self._demuxed += match.group(1)
+                        if curr_v == targ_v:
                             self._demux_v = match.group(1)
                     curr_v += 1
                 elif re.match('Audio \d', line):
-                    if curr_a == targ_a:
-                        match = re.search(fileRE, line)
-                        if match:
+                    match = re.search(fileRE, line)
+                    if match:
+                        self._demuxed += match.group(1)
+                        if curr_a == targ_a:
                             self._demux_a = match.group(1)
                     curr_a += 1
     
@@ -971,8 +937,7 @@ class Transcoder:
         name = os.path.split(self._demux)[-1]
         try:
             _cmd(['java', '-jar', self.opts.projectx, '-out', self.opts.tmp,
-                  '-name', name, '-cut', self._xcl, '-demux',
-                  self.source.orig])
+                  '-name', name, '-demux', self._join])
         except RuntimeError:
             raise RuntimeError('Could not demux video.')
         self._find_demux()
@@ -1078,11 +1043,14 @@ class Transcoder:
         'Removes any temporary files generated during encoding.'
         self.clean_video()
         self.clean_audio()
-        _clean(self._split)
+        for seg in xrange(0, self.seg):
+            _clean('%s-%d.ts' % (self.source.base, self.seg))
+        for demux in self._demuxed:
+            _clean(demux)
+        _clean(self._join)
         _clean(self._wav)
         _clean(self._aac)
         _clean(self._h264)
-        _clean(self._xcl)
         for log in ['ffmpeg2pass-0.log', 'x264_2pass.log',
                     'x264_2pass.log.mbtree', '%s_log.txt' % self._demux,
                     '%s_log.txt' % self.source.base]:
@@ -1098,8 +1066,8 @@ class Source(dict):
     resolution = None
     duration = None
     cutlist = None
-    vstreams = []
-    astreams = []
+    vstreams = 0
+    astreams = 0
     base = None
     orig = None
     rating = None
@@ -1140,8 +1108,8 @@ class Source(dict):
         '''Obtains source media parameters such as resolution and FPS
         using ffmpeg.'''
         (fps, resolution, duration) = (None, None, None)
-        (vstreams, astreams) = ([], [])
-        stream = 'Stream.*\[0x([0-9a-fA-F]+)\].*'
+        (vstreams, astreams) = (0, 0)
+        stream = 'Stream.*\[0x[0-9a-fA-F]+\].*'
         fpsRE = re.compile('([0-9]*\.?[0-9]*) tbr')
         videoRE = re.compile(stream + 'Video:.*\s+([0-9]+)x([0-9]+)')
         audioRE = re.compile(stream + ':\s*Audio')
@@ -1156,27 +1124,14 @@ class Source(dict):
                     fps = float(match.group(1))
                 match = re.search(videoRE, line)
                 if match:
-                    enabled = False
-                    if re.search('Video:.*\(Main\)', line):
-                        logging.debug('Found video stream 0x%s' %
-                                      match.group(1))
-                        enabled = True
-                    vstreams += [(int(match.group(1), 16), enabled)]
+                    vstreams += 1
                     if resolution is None:
-                        width = int(match.group(2))
-                        height = int(match.group(3))
+                        width = int(match.group(1))
+                        height = int(match.group(2))
                         resolution = (width, height)
                 match = re.search(audioRE, line)
                 if match:
-                    enabled = False
-                    pid = int(match.group(1), 16)
-                    match = re.search('\]\(([A-Za-z]+)\)', line)
-                    if match:
-                        if match.group(1) == _iso_639_2(self.opts.language):
-                            logging.debug('Found audio stream 0x%s' %
-                                          match.group(1))
-                            enabled = True
-                    astreams += [(pid, enabled)]
+                    astreams += 1
                 match = re.search(duraRE, line)
                 if match:
                     hour = int(match.group(1))
@@ -1188,18 +1143,10 @@ class Source(dict):
             proc.wait()
         except OSError:
             raise RuntimeError('FFmpeg is not installed.')
-        if len(vstreams) == 0:
+        if vstreams == 0:
             raise RuntimeError('No video streams could be found.')
-        if len(astreams) == 0:
+        if astreams == 0:
             raise RuntimeError('No audio streams could be found.')
-        if len([vid[0] for vid in vstreams if vid[1]]) == 0:
-            logging.debug('No detected video streams, enabling %s' %
-                          hex(vstreams[0][0]))
-            vstreams[0] = (vstreams[0][0], True)
-        if len([aud[0] for aud in astreams if aud[1]]) == 0:
-            logging.debug('No detected audio streams, enabling %s' %
-                          hex(astreams[0][0]))
-            astreams[0] = (astreams[0][0], True)
         return fps, resolution, duration, vstreams, astreams
     
     def _align_episode(self):
@@ -1616,6 +1563,7 @@ if __name__ == '__main__':
     s.print_metadata()
     t = Transcoder(s, opts)
     t.split()
+    t.join()
     t.demux()
     s.clean_copy()
     t.encode_audio()
