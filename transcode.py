@@ -256,6 +256,58 @@ def _ver(args, regex, use_stderr = True):
             pass
     return ret
 
+def _nero_ver():
+    '''Determines whether neroAacEnc is present, and if so, returns the
+    version string for later.'''
+    regex = 'Package version:\s*([0-9.]+)'
+    ver = _ver(['neroAacEnc', '-help'], regex)
+    if not ver:
+        regex = 'Package build date:\s*([A-Za-z]+\s+[0-9]+\s+[0-9]+)'
+        ver = _ver(['neroAacEnc', '-help'], regex)
+    if ver:
+        ver = 'Nero AAC Encoder %s' % ver
+    return ver
+
+def _ffmpeg_ver():
+    '''Determines whether ffmpeg is present, and if so, returns the
+    version string for later.'''
+    return _ver(['ffmpeg', '-version'], '([Ff]+mpeg.*)$',
+                use_stderr = False)
+
+def _x264_ver():
+    '''Determines whether x264 is present, and if so, returns the
+    version string for later. Does not check whether ffmpeg has libx264
+    support linked in.'''
+    return _ver(['x264', '--version'], '(x264.*)$')
+
+def _faac_ver():
+    '''Determines whether ffmpeg is present, and if so, returns the
+    version string for later. Does not check whether ffmpeg has libfaac
+    support linked in.'''
+    return _ver(['faac', '--help'], '(FAAC.*)$')
+
+def _projectx_ver(opts):
+    '''Determines whether Project-X is present, and if so, returns the
+    version string for later.'''
+    return _ver(['java', '-jar', opts.projectx, '-?'],
+                '(ProjectX [0-9/.]*)')
+
+def _version(opts):
+    'Compiles a string representing the versions of the encoding tools.'
+    nero_ver = _nero_ver()
+    faac_ver = _faac_ver()
+    x264_ver = _x264_ver()
+    ver = _ffmpeg_ver()
+    if x264_ver:
+        ver += ', %s' % x264_ver
+    ver += ', %s' % _projectx_ver(opts)
+    if opts.nero and nero_ver:
+        ver += ', %s' % nero_ver
+    elif faac_ver:
+        ver += ', %s' % faac_ver
+    logging.debug('Version string: %s' % ver)
+    return ver
+
 def _iso_639_2(lang):
     '''Translates from a two-letter ISO language code (ISO 639-1) to a
     three-letter ISO language code (ISO 639-2).'''
@@ -687,7 +739,6 @@ class Transcoder:
     _demux_a = None
     _frames = 0
     _extra = 0
-    _split_args = None
     
     def __init__(self, source, opts):
         self.source = source
@@ -702,97 +753,23 @@ class Transcoder:
         self.metadata = Metadata(source)
         self.check()
     
-    def _nero_ver(self):
-        '''Determines whether neroAacEnc is present, and if so, returns the
-        version string for later.'''
-        regex = 'Package version:\s*([0-9.]+)'
-        ver = _ver(['neroAacEnc', '-help'], regex)
-        if not ver:
-            regex = 'Package build date:\s*([A-Za-z]+\s+[0-9]+\s+[0-9]+)'
-            ver = _ver(['neroAacEnc', '-help'], regex)
-        if ver:
-            ver = 'Nero AAC Encoder %s' % ver
-        return ver
-    
-    def _ffmpeg_ver(self):
-        '''Determines whether ffmpeg is present, and if so, returns the
-        version string for later.'''
-        return _ver(['ffmpeg', '-version'], '([Ff]+mpeg.*)$',
-                         use_stderr = False)
-    
-    def _x264_ver(self):
-        '''Determines whether x264 is present, and if so, returns the
-        version string for later. Does not check whether ffmpeg has libx264
-        support linked in.'''
-        return _ver(['x264', '--version'], '(x264.*)$')
-    
-    def _faac_ver(self):
-        '''Determines whether ffmpeg is present, and if so, returns the
-        version string for later. Does not check whether ffmpeg has libfaac
-        support linked in.'''
-        return _ver(['faac', '--help'], '(FAAC.*)$')
-    
-    def _projectx_ver(self):
-        '''Determines whether Project-X is present, and if so, returns the
-        version string for later.'''
-        return _ver(['java', '-jar', self.opts.projectx, '-?'], \
-                        '(ProjectX [0-9/.]*)')
-    
-    def version(self):
-        'Compiles a string representing the versions of the encoding tools.'
-        nero_ver = self._nero_ver()
-        faac_ver = self._faac_ver()
-        x264_ver = self._x264_ver()
-        ver = self._ffmpeg_ver()
-        if x264_ver:
-            ver += ', %s' % x264_ver
-        ver += ', %s' % self._projectx_ver()
-        if self.opts.nero and nero_ver:
-            ver += ', %s' % nero_ver
-        elif faac_ver:
-            ver += ', %s' % faac_ver
-        logging.debug('Version string: %s' % ver)
-        return ver
-    
     def check(self):
         '''Determines whether ffmpeg is installed and has built-in support
         for the requested encoding method.'''
         codecs = ['ffmpeg', '-codecs']
-        if not self._ffmpeg_ver():
+        if not _ffmpeg_ver():
             raise RuntimeError('FFmpeg is not installed.')
         if not _ver(codecs, '--enable-(libx264)'):
             raise RuntimeError('FFmpeg does not support libx264.')
         if not self.opts.nero and not _ver(codecs, '--enable-(libfaac)'):
             raise RuntimeError('FFmpeg does not support libfaac. ' +
                                '(Perhaps try using neroAacEnc?)')
-        if self.opts.nero and not self._nero_ver():
+        if self.opts.nero and not _nero_ver():
             raise RuntimeError('neroAacEnc is not installed.')
         if not _ver(['MP4Box', '-version'], 'version\s*([0-9.DEV]+)'):
             raise RuntimeError('MP4Box is not installed.')
         if not self.source.meta_present:
             self.metadata.enabled = False
-    
-    def _check_split_args(self):
-        '''Determines the arguments to pass to FFmpeg when performing queries
-        on bytecode positions. Versions 0.7 and older use -newaudio /
-        -newvideo tags for each additional stream present. Versions 0.8 and
-        newer use -map 0:v -map 0:a to automatically copy over all streams.'''
-        match = re.search('[Ff]+mpeg\s+(.*)$', self._ffmpeg_ver())
-        if not match:
-            raise RuntimeError('FFmpeg version could not be determined.')
-        ver = match.group(1)
-        match = re.match('^([0-9]+\.[0-9]+)', ver)
-        if match and float(match.group(1)) <= 0.7:
-            args = [['-acodec', 'copy', '-vcodec', 'copy',
-                     '-f', 'mpegts']]
-            for astream in xrange(1, self.source.astreams):
-                args += [['-acodec', 'copy', '-newaudio']]
-            for vstream in xrange(1, self.source.vstreams):
-                args += [['-vcodec', 'copy', '-newvideo']]
-        else:
-            args = [['-map', '0:v', '-map', '0:a', '-c', 'copy',
-                     '-f', 'mpegts']]
-        return args
     
     def _extract(self, clip, elapsed):
         '''Creates a new chapter marker at elapsed and uses ffmpeg to extract
@@ -803,10 +780,10 @@ class Transcoder:
                       _seconds_to_time(clip[1])))
         self.chapters.add(elapsed, self.seg)
         args = ['ffmpeg', '-y', '-i', self.source.orig, '-ss', str(clip[0]),
-                '-t', str(clip[1] - clip[0])] + self._split_args[0]
+                '-t', str(clip[1] - clip[0])] + self.source.split_args[0]
         args += ['%s-%d.ts' % (self.source.base, self.seg)]
-        if len(self._split_args) > 1:
-            args += self._split_args[1]
+        if len(self.source.split_args) > 1:
+            args += self.source.split_args[1]
         _cmd(args)
         self.seg += 1
     
@@ -814,7 +791,6 @@ class Transcoder:
         '''Uses the source's cutlist to mark specific video clips from the
         source video for extraction while also setting chapter markers.'''
         (pos, elapsed) = (0, 0)
-        self._split_args = self._check_split_args()
         for cut in self.source.cutlist:
             (start, end) = cut
             if start > self.opts.thresh and start > pos:
@@ -840,10 +816,10 @@ class Transcoder:
             else:
                 raise RuntimeError('Could not find video segment %s.' % name)
         concat = concat[:-1]
-        args = ['ffmpeg', '-y', '-i', concat] + self._split_args[0]
+        args = ['ffmpeg', '-y', '-i', concat] + self.source.split_args[0]
         args += [self._join]
-        if len(self._split_args) > 1:
-            args += self._split_args[1]
+        if len(self.source.split_args) > 1:
+            args += self.source.split_args[1]
         _cmd(args)
         self.subtitles.extract(self._join)
     
@@ -1033,7 +1009,7 @@ class Transcoder:
         self.subtitles.write()
         self.chapters.write()
         _cmd(common + ['-lang', self.opts.language, self.source.mp4])
-        self.metadata.write(self.version())
+        self.metadata.write(_version(self.opts))
     
     def clean_video(self):
         'Removes the temporary video stream data.'
@@ -1078,6 +1054,7 @@ class Source(dict):
     final = None
     mp4 = None
     meta_present = False
+    split_args = None
     
     def __repr__(self):
         season = int(self.get('season', 0))
@@ -1107,6 +1084,28 @@ class Source(dict):
         else:
             self.mp4ext = 'mp4'
         self.tvdb = MythTV.ttvdb.tvdb_api.Tvdb(language = self.opts.language)
+    
+    def _check_split_args(self):
+        '''Determines the arguments to pass to FFmpeg when copying video data
+        during splits or frame queries. Versions 0.7 and older use -newaudio /
+        -newvideo tags for each additional stream present. Versions 0.8 and
+        newer use -map 0:v -map 0:a to automatically copy over all streams.'''
+        match = re.search('[Ff]+mpeg\s+(.*)$', _ffmpeg_ver())
+        if not match:
+            raise RuntimeError('FFmpeg version could not be determined.')
+        ver = match.group(1)
+        match = re.match('^([0-9]+\.[0-9]+)', ver)
+        if match and float(match.group(1)) <= 0.7:
+            args = [['-acodec', 'copy', '-vcodec', 'copy',
+                     '-f', 'mpegts']]
+            for astream in xrange(1, self.astreams):
+                args += [['-acodec', 'copy', '-newaudio']]
+            for vstream in xrange(1, self.vstreams):
+                args += [['-vcodec', 'copy', '-newvideo']]
+        else:
+            args = [['-map', '0:v', '-map', '0:a', '-c', 'copy',
+                     '-f', 'mpegts']]
+        self.split_args = args
     
     def video_params(self):
         '''Obtains source media parameters such as resolution and FPS
@@ -1151,6 +1150,7 @@ class Source(dict):
             raise RuntimeError('No video streams could be found.')
         if astreams == 0:
             raise RuntimeError('No audio streams could be found.')
+        self._check_split_args()
         return fps, resolution, duration, vstreams, astreams
     
     def _align_episode(self):
@@ -1365,12 +1365,35 @@ class MythSource(Source):
         self.final = self.final_name()
         self.mp4 = '%s.%s' % (self.final, self.mp4ext)
     
+    def _frame_to_timecode(self, frame):
+        '''Uses ffmpeg to remux a given number of frames in the video file
+        in order to determine the amount of time elapsed by those frames.'''
+        time = 0
+        args = ['ffmpeg', '-y', '-i', self.orig, '-vframes',
+                str(frame)] + self.split_args[0]
+        args += [os.devnull]
+        if len(self.split_args) > 1:
+            args += self.split_args[1]
+        proc = subprocess.Popen(args, stdout = subprocess.PIPE,
+                                stderr = subprocess.STDOUT)
+        logging.debug('$ %s' % u' '.join(args))
+        regex = re.compile('time=(\d\d):(\d\d):(\d\d\.\d\d)(?!.*time)')
+        for line in proc.stdout:
+            match = re.search(regex, line)
+            if match:
+                time = 3600 * int(match.group(1)) + 60 * int(match.group(2))
+                time += float(match.group(3))
+        return time
+    
     def _cut_list(self):
         'Obtains the MythTV commercial-skip cutlist from the database.'
-        cl = self.rec.markup.getcutlist()
+        logging.info('*** Locating cut points ***')
+        markup = self.rec.markup.getcutlist()
         self.cutlist = []
-        for i in xrange(0, len(cl)):
-            self.cutlist.append((cl[i][0] / self.fps, cl[i][1] / self.fps))
+        for cut in xrange(0, len(markup)):
+            start = self._frame_to_timecode(markup[cut][0])
+            end = self._frame_to_timecode(markup[cut][1])
+            self.cutlist.append((start, end))
     
     def _fetch_metadata(self):
         'Obtains any metadata MythTV might have stored in the database.'
