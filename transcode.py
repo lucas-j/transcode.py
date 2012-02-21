@@ -100,7 +100,7 @@ import MythTV, MythTV.ttvdb.tvdb_api, MythTV.ttvdb.tvdb_exceptions
 # --- Change these default values before using this program ---
 
 # directory to store encoded video file
-_OUT_DEFAULT = 'E:\\Media\\Video'
+_OUT_DEFAULT = '/home/lucas/Videos'
 
 # temporary directory to use while encoding
 # (if left as None, a temporary directory will be created)
@@ -128,10 +128,10 @@ _USER_DEFAULT = 'mythtv'
 _PASS_DEFAULT = 'mythtv'
 
 # path to the Project-X JAR file (used for noise cleaning / cutting)
-_PROJECTX_DEFAULT = 'C:\\Apps\\Project-X\\ProjectX.jar'
+_PROJECTX_DEFAULT = '/home/lucas/Code/project-x/ProjectX.jar'
 
 # path to remuxTool.jar (used for extracting MPEG-2 data from WTV files)
-_REMUXTOOL_DEFAULT = 'C:\\Apps\\remuxTool\\remuxTool.jar'
+_REMUXTOOL_DEFAULT = '/home/lucas/Code/remuxTool.jar'
 
 def _clean(filename):
     'Removes the file if it exists.'
@@ -783,15 +783,15 @@ class Transcoder:
         ver = match.group(1)
         match = re.match('^([0-9]+\.[0-9]+)', ver)
         if match and float(match.group(1)) <= 0.7:
-            args = ['-acodec', 'copy', '-vcodec', 'copy',
-                    '-f', 'mpegts']
+            args = [['-acodec', 'copy', '-vcodec', 'copy',
+                     '-f', 'mpegts']]
             for astream in xrange(1, self.source.astreams):
-                args += ['-acodec', 'copy', '-newaudio']
+                args += [['-acodec', 'copy', '-newaudio']]
             for vstream in xrange(1, self.source.vstreams):
-                args += ['-vcodec', 'copy', '-newvideo']
+                args += [['-vcodec', 'copy', '-newvideo']]
         else:
-            args = ['-map', '0:v', '-map', '0:a', '-c', 'copy',
-                    '-f', 'mpegts']
+            args = [['-map', '0:v', '-map', '0:a', '-c', 'copy',
+                     '-f', 'mpegts']]
         return args
     
     def _extract(self, clip, elapsed):
@@ -803,8 +803,10 @@ class Transcoder:
                       _seconds_to_time(clip[1])))
         self.chapters.add(elapsed, self.seg)
         args = ['ffmpeg', '-y', '-i', self.source.orig, '-ss', str(clip[0]),
-                '-t', str(clip[1] - clip[0])] + self._split_args
+                '-t', str(clip[1] - clip[0])] + self._split_args[0]
         args += ['%s-%d.ts' % (self.source.base, self.seg)]
+        if len(self._split_args) > 1:
+            args += self._split_args[1]
         _cmd(args)
         self.seg += 1
     
@@ -838,8 +840,10 @@ class Transcoder:
             else:
                 raise RuntimeError('Could not find video segment %s.' % name)
         concat = concat[:-1]
-        args = ['ffmpeg', '-y', '-i', concat] + self._split_args
+        args = ['ffmpeg', '-y', '-i', concat] + self._split_args[0]
         args += [self._join]
+        if len(self._split_args) > 1:
+            args += self._split_args[1]
         _cmd(args)
         self.subtitles.extract(self._join)
     
