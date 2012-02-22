@@ -1410,11 +1410,10 @@ class MythSource(Source):
         self.time = _convert_time(time)
         self.base = os.path.join(opts.tmp, '%s_%s' % (str(channel), str(time)))
         self.orig = self.base + '-orig.mpg'
-        self.db = MythTV.MythDB(DBHostName = opts.host,
-                                DBName = opts.database,
-                                DBUserName = opts.user,
-                                DBPassword = opts.password,
-                                SecurityPin = opts.pin)
+        self.db_info = {'DBHostName' : opts.host, 'DBName' : opts.database,
+                        'DBUserName' : opts.user, 'DBPassword' : opts.password,
+                        'SecurityPin' : opts.pin}
+        self.db = MythTV.MythDB(**self.db_info)
         try:
             self.rec = MythTV.Recorded((channel, time), db = self.db)
         except MythTV.exceptions.MythError:
@@ -1658,14 +1657,14 @@ if __name__ == '__main__':
     t.split()
     t.join()
     t.demux()
-    s.clean_copy()
+    #s.clean_copy()
     t.encode_audio()
-    t.clean_audio()
+    #t.clean_audio()
     t.encode_video()
-    t.clean_video()
+    #t.clean_video()
     t.remux()
-    t.clean_tmp()
-    s.clean_tmp()
+    #t.clean_tmp()
+    #s.clean_tmp()
 
 # Copyright (c) 2012, Lucas Jacobs
 # All rights reserved.
