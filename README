@@ -1,9 +1,9 @@
 This program uses a MythTV database or WTV recording to transcode
 recorded TV programs to MPEG-4 video using the H.264 and AAC codecs, cutting
 the video at certain commercial points selected by the user within MythTV's
-frontend or by an automatic commercial flagger, complete with SRT subtitles
-extracted from the embedded VBI closed-caption data, and iTunes-style
-metadata about the program, if it can be found.
+frontend or by Comskip. The resulting MPEG-4 file comes complete with SRT
+subtitles extracted from the embedded VBI closed-caption data. and
+iTunes-compatible metadata about the episode, if it can be found.
 
 In short, this program calls a bunch of programs to convert a file like
 1041_20100523000000.mpg or Program Name_ABC_2010_05_23_00_00_00.wtv into a
@@ -15,18 +15,22 @@ transcode from remote sources - e.g., mythbackend / MySQL running on a
 different computer, or WTV source files from a remote SMB share / HomeGroup.
 
 Requirements:
-- FFmpeg
-- x264 (ffmpeg will be called with -vcodec libx264)
-- neroAacEnc (http://www.nero.com/enu/technologies-aac-codec.html)
-- Project-X and a suitable JVM (http://project-x.sourceforge.net)
-- remuxTool.jar for WTV (http://babgvant.com/downloads/dburckh/remuxTool.jar)
+- FFmpeg (http://ffmpeg.org)
+  - must be compiled with --enable-libx264
+  - if using faac for audio encoding, must be compiled with --enable-libfaac
+- Java (http://www.java.com)
+- Project-X (http://project-x.sourceforge.net)
+- remuxTool.jar (http://babgvant.com/downloads/dburckh/remuxTool.jar)
 - MP4Box (http://gpac.sourceforge.net)
-- ccextractor (http://ccextractor.sourceforge.net)
-- AtomicParsley (https://bitbucket.org/wez/atomicparsley)
 - Python 2.6+ (http://www.python.org)
   - lxml (http://lxml.de)
   - mysql-python (http://sourceforge.net/projects/mysql-python)
   - the MythTV Python bindings (if MythTV is not installed already)
+
+Optional dependencies:
+- neroAacEnc (http://www.nero.com/enu/technologies-aac-codec.html)
+- ccextractor (http://ccextractor.sourceforge.net)
+- AtomicParsley (https://bitbucket.org/wez/atomicparsley)
 
 Most of these packages can usually be found in various Linux software
 repositories or as pre-compiled Windows binaries.
@@ -34,8 +38,12 @@ repositories or as pre-compiled Windows binaries.
 Setup:
 - Make sure the above dependencies are installed on your system. Add each
   binary location to your PATH variable if necessary.
-- Change the default values within transcode.py, or specify appropriate
-  command-line options.
+- Edit the settings in transcode.conf to your preference. At a minimum,
+  specify paths to Project-X and remuxTool, specify a directory to output
+  transcoded video, and enter your MythTV host IP (if using MythTV).
+- If on Linux, optionally install transcode.py to /usr/local/bin and
+  copy transcode.conf to ~/.transcode - otherwise, run the program from
+  within its directory.
 
 Usage:
   transcode.py %CHANID% %STARTTIME%
@@ -66,6 +74,7 @@ Special thanks to:
 - Project-X team
 
 Changelog:
+1.2 - better accuracy for commercial clipping, easier configuration
 1.1 - support for multiple audio streams, Comskip
 1.0 - initial release
 
@@ -74,6 +83,8 @@ TODO:
 - check for adequate disk space on /tmp and destination partitions
 - generate thumbnail if necessary
 - better genre interpretation for WTV files
+- fetch metadata for movies as well as TV episodes
+- allow users to manually enter in metadata if none can be found
 
 Long-term goals:
 - support for boxed-set TV seasons on DVD
@@ -81,7 +92,6 @@ Long-term goals:
 - metadata / chapter support for as many different players as possible,
   especially Windows Media Player
 - optionally use Matroska / VP8 as a target format
-- easier access and configuration
 - easier installation: all required programs should be bundled
 
 Known issues:

@@ -5,9 +5,9 @@
 This program uses a MythTV database or WTV recording to transcode
 recorded TV programs to MPEG-4 video using the H.264 and AAC codecs, cutting
 the video at certain commercial points selected by the user within MythTV's
-frontend or by an automatic commercial flagger, complete with SRT subtitles
-extracted from the embedded VBI closed-caption data, and iTunes-style
-metadata about the program, if it can be found.
+frontend or by Comskip. The resulting MPEG-4 file comes complete with SRT
+subtitles extracted from the embedded VBI closed-caption data. and
+iTunes-compatible metadata about the episode, if it can be found.
 
 In short, this program calls a bunch of programs to convert a file like
 1041_20100523000000.mpg or Program Name_ABC_2010_05_23_00_00_00.wtv into a
@@ -19,18 +19,22 @@ transcode from remote sources - e.g., mythbackend / MySQL running on a
 different computer, or WTV source files from a remote SMB share / HomeGroup.
 
 Requirements:
-- FFmpeg
-- x264 (ffmpeg will be called with -vcodec libx264)
-- neroAacEnc (http://www.nero.com/enu/technologies-aac-codec.html)
-- Project-X and a suitable JVM (http://project-x.sourceforge.net)
-- remuxTool.jar for WTV (http://babgvant.com/downloads/dburckh/remuxTool.jar)
+- FFmpeg (http://ffmpeg.org)
+  - must be compiled with --enable-libx264
+  - if using faac for audio encoding, must be compiled with --enable-libfaac
+- Java (http://www.java.com)
+- Project-X (http://project-x.sourceforge.net)
+- remuxTool.jar (http://babgvant.com/downloads/dburckh/remuxTool.jar)
 - MP4Box (http://gpac.sourceforge.net)
-- ccextractor (http://ccextractor.sourceforge.net)
-- AtomicParsley (https://bitbucket.org/wez/atomicparsley)
 - Python 2.6+ (http://www.python.org)
   - lxml (http://lxml.de)
   - mysql-python (http://sourceforge.net/projects/mysql-python)
   - the MythTV Python bindings (if MythTV is not installed already)
+
+Optional dependencies:
+- neroAacEnc (http://www.nero.com/enu/technologies-aac-codec.html)
+- ccextractor (http://ccextractor.sourceforge.net)
+- AtomicParsley (https://bitbucket.org/wez/atomicparsley)
 
 Most of these packages can usually be found in various Linux software
 repositories or as pre-compiled Windows binaries.
@@ -38,8 +42,12 @@ repositories or as pre-compiled Windows binaries.
 Setup:
 - Make sure the above dependencies are installed on your system. Add each
   binary location to your PATH variable if necessary.
-- Change the default values within this file, or specify appropriate
-  command-line options.
+- Edit the settings in transcode.conf to your preference. At a minimum,
+  specify paths to Project-X and remuxTool, specify a directory to output
+  transcoded video, and enter your MythTV host IP (if using MythTV).
+- If on Linux, optionally install transcode.py to /usr/local/bin and
+  copy transcode.conf to ~/.transcode - otherwise, run the program from
+  within its directory.
 
 Usage:
   transcode.py %CHANID% %STARTTIME%
@@ -71,6 +79,7 @@ Special thanks to:
 '''
 
 # Changelog:
+# 1.2 - better accuracy for commercial clipping, easier configuration
 # 1.1 - support for multiple audio streams, Comskip
 # 1.0 - initial release
 
@@ -79,59 +88,24 @@ Special thanks to:
 # - check for adequate disk space on /tmp and destination partitions
 # - generate thumbnail if necessary
 # - better genre interpretation for WTV files
+# - fetch metadata for movies as well as TV episodes
+# - allow users to manually enter in metadata if none can be found
 
 # Long-term goals:
 # - support for boxed-set TV seasons on DVD
 # - metadata / chapter support for as many different players as possible,
 #   especially Windows Media Player
 # - optionally use Matroska / VP8 as a target format
-# - easier access and configuration
 # - easier installation: all required programs should be bundled
 
 # Known issues:
-# - subtitles seem to be out-of-sync when played with MPlayer, works in vlc
+# - subtitles seem to be out-of-sync
 # - subtitle font is sometimes too large on QuickTime / iTunes / iPods
 
 import re, os, sys, math, datetime, subprocess, contextlib, threading
 import urllib, tempfile, glob, shutil, codecs, StringIO, time, optparse
 import unicodedata, logging, xml.dom.minidom
 import MythTV, MythTV.ttvdb.tvdb_api, MythTV.ttvdb.tvdb_exceptions
-
-# --- Change these default values before using this program ---
-
-# directory to store encoded video file
-_OUT_DEFAULT = '/home/lucas/Videos'
-
-# temporary directory to use while encoding
-# (if left as None, a temporary directory will be created)
-_TMP_DEFAULT = None
-
-# format string for the encoded video filename. some examples:
-# '%T/%T - %S' -> 'Show/Show - Episode'
-# '%C/%T/%o - %S' -> 'Genre/Show/1x23 - Episode'
-# '%oY/%T (%sx%e) - %S' -> '2012/Show (1x23) - Episode'
-_FMT_DEFAULT = '%T/%T - %S'
-
-# two-letter language code (ISO 639-2) of the audio track to be obtained
-_LANG_DEFAULT = 'en'
-
-# MythTV database host (change this if using MythTV)
-_HOST_DEFAULT = '192.168.1.12'
-
-# MySQL database for MythTV (usually 'mythconverg')
-_DB_DEFAULT = 'mythconverg'
-
-# MySQL username for MythTV (usually 'mythtv')
-_USER_DEFAULT = 'mythtv'
-
-# MySQL password for MythTV (usually 'mythtv')
-_PASS_DEFAULT = 'mythtv'
-
-# path to the Project-X JAR file (used for noise cleaning / cutting)
-_PROJECTX_DEFAULT = '/home/lucas/Code/project-x/ProjectX.jar'
-
-# path to remuxTool.jar (used for extracting MPEG-2 data from WTV files)
-_REMUXTOOL_DEFAULT = '/home/lucas/Code/remuxTool.jar'
 
 def _clean(filename):
     'Removes the file if it exists.'
@@ -322,8 +296,88 @@ def _iso_639_2(lang):
     else:
         raise ValueError('Invalid language code %s.' % lang)
 
+def _find_conf_file():
+    'Obtains the location of the config file if one exists.'
+    local_dotfile = os.path.expanduser('~/.transcode')
+    if os.path.exists(local_dotfile):
+        return local_dotfile
+    conf_file = os.path.split(os.path.realpath(__file__))[0]
+    conf_file = os.path.join(conf_file, 'transcode.conf')
+    if os.path.exists(conf_file):
+        return conf_file
+    return None
+
+def _get_defaults():
+    'Returns configuration defaults for this program.'
+    test = 'foo'
+    opts = {'final_path' : '/srv/video', 'tmp' : None, 'format' : '%T/%T - %S',
+            'replace_char' : '', 'language' : 'en', 'two_pass' : False,
+            'preset' : None, 'video_br' : 1500, 'video_crf' : 22,
+            'ipod' : True, 'ipod_preset' : 'ipod640', 'nero' : True,
+            'audio_br' : 128, 'audio_q' : 0.3, 'use_tvdb_rating' : True,
+            'use_tvdb_descriptions' : False, 'host' : '127.0.0.1',
+            'database' : 'mythconverg', 'user' : 'mythtv',
+            'password' : 'mythtv', 'pin' : 0, 'quiet' : False,
+            'verbose' : False, 'thresh' : 5,
+            'projectx' : 'project-x/ProjectX.jar',
+            'remuxtool' : 'remuxTool.jar'}
+    return opts
+
+def _add_option(opts, key, val):
+    'Inserts the given configuration setting into the dictionary.'
+    key = key.lower()
+    if key in ['tmp', 'preset']:
+        if val == '' or not val:
+            val = None
+    if key in ['two_pass', 'ipod', 'nero', 'use_tvdb_rating',
+               'use_tvdb_descriptions', 'quiet', 'verbose']:
+        val = val.lower()
+        if val in ['1', 't', 'y', 'true', 'yes', 'on']:
+            val = True
+        elif val in ['0', 'f', 'n', 'false', 'no', 'off']:
+            val = False
+        else:
+            raise ValueError('Invalid boolean value for %s: %s' % (key, val))
+    if key in ['video_br', 'video_crf', 'audio_br', 'audio_q',
+               'pin', 'thresh', 'audio_q']:
+        try:
+            if key == 'audio_q':
+                val = float(val)
+            else:
+                val = int(val)
+        except ValueError:
+            raise ValueError('Invalid numerical value for %s: %s' % (key, val))
+    if key in ['projectx', 'remuxtool']:
+        if not os.path.exists(val):
+            raise IOError('File not found: %s' % val)
+    opts[key] = val
+
+def _read_options():
+    'Reads configuration settings from a file.'
+    opts = _get_defaults()
+    conf_name = _find_conf_file()
+    if conf_name is not None:
+        with open(conf_name, 'r') as conf_file:
+            regex = re.compile('^\s*(.*)\s*=\s*(.*)\s*$')
+            ignore = re.compile('#.*')
+            for line in conf_file:
+                line = re.sub(ignore, '', line).strip()
+                match = re.search(regex, line)
+                if match:
+                    _add_option(opts, match.group(1).strip(),
+                                match.group(2).strip())
+    return opts
+
+def _def_str(test, val):
+    'Returns " [default]" if test is equal to val.'
+    if test == val:
+        return ' [default]'
+    else:
+        return ''
+
 def _get_options():
     'Uses optparse to obtain command-line options.'
+    opts = _read_options()
     usage = 'usage: %prog [options] chanid time\n' + \
         '  %prog [options] wtv-file'
     version = '%prog 1.1'
@@ -331,114 +385,126 @@ def _get_options():
                                    formatter = optparse.TitledHelpFormatter())
     flopts = optparse.OptionGroup(parser, 'File options')
     flopts.add_option('-o', '--out', dest = 'final_path', metavar = 'PATH',
-                      default = _OUT_DEFAULT, help = 'directory to ' +
-                      'store encoded video file                    ' +
+                      default = opts['final_path'], help = 'directory to ' +
+                      'store encoded video file                          ' +
                       '[default: %default]')
-    if _TMP_DEFAULT:
+    if opts['tmp']:
         flopts.add_option('-t', '--tmp', dest = 'tmp', metavar = 'PATH',
-                          default = _TMP_DEFAULT, help = 'temporary ' +
+                          default = opts['tmp'], help = 'temporary ' +
                           'directory to be used while transcoding ' +
                           '[default: %default]')
     else:
         flopts.add_option('-t', '--tmp', dest = 'tmp', metavar = 'PATH',
                           help = 'temporary directory to be used while ' +
                           'transcoding [default: %s]' % tempfile.gettempdir())
-    flopts.add_option('--format', dest = 'final_format',
-                      default = _FMT_DEFAULT, metavar = 'FMT',
+    flopts.add_option('--format', dest = 'format',
+                      default = opts['format'], metavar = 'FMT',
                       help = 'format string for the encoded video filename ' +
                       '          [default: %default]')
-    flopts.add_option('--replace', dest = 'replace_char', default = '',
-                      metavar = 'CHAR', help = 'character to substitute ' +
-                      'for invalid filename characters [default: nothing]')
+    flopts.add_option('--replace', dest = 'replace_char',
+                      default = opts['replace_char'],  metavar = 'CHAR',
+                      help = 'character to substitute for invalid filename ' +
+                      'characters [default: "%default"]')
     flopts.add_option('-l', '--lang', dest = 'language',
-                      default = _LANG_DEFAULT, metavar = 'LANG',
+                      default = opts['language'], metavar = 'LANG',
                       help = 'two-letter language code [default: %default]')
     parser.add_option_group(flopts)
     viopts = optparse.OptionGroup(parser, 'Video encoding options')
     viopts.add_option('-1', '--one-pass', dest = 'two_pass',
-                      action = 'store_false', default = False,
-                      help = 'one-pass encoding [default]')
+                      action = 'store_false', default = opts['two_pass'],
+                      help = 'one-pass encoding' +
+                      _def_str(opts['two_pass'], False))
     viopts.add_option('-2', '--two-pass', dest = 'two_pass',
-                      action = 'store_true', help = 'two-pass encoding')
+                      action = 'store_true', help = 'two-pass encoding' +
+                      _def_str(opts['two_pass'], True))
     viopts.add_option('-p', '--preset', dest = 'preset', metavar = 'PRE',
-                      default = None, help = 'ffmpeg x264 preset to use ' +
-                      '[default: %default]')
+                      default = opts['preset'], help = 'ffmpeg x264 preset ' +
+                      'to use [default: %default]')
     viopts.add_option('--video-br', dest = 'video_br', metavar = 'BR',
-                      type = 'int', default = 1500, help = 'two-pass target ' +
-                      'video bitrate (in KB/s) [default: %default]')
-    viopts.add_option('--video-crf', dest = 'video_crf', metavar = 'CR',
-                      type = 'int', default = 22, help = 'one-pass target ' +
-                      'compression ratio (~15-25 is ideal) ' +
+                      type = 'int', default = opts['video_br'],
+                      help = 'two-pass target video bitrate (in KB/s) ' +
                       '[default: %default]')
+    viopts.add_option('--video-crf', dest = 'video_crf', metavar = 'CR',
+                      type = 'int', default = opts['video_crf'],
+                      help = 'one-pass target compression ratio (~15-25 is ' +
+                      'ideal) [default: %default]')
     viopts.add_option('--ipod', dest = 'ipod', action = 'store_true',
-                      default = True, help = 'use iPod Touch compatibility ' +
-                      'settings [default]')
+                      default = opts['ipod'], help = 'use iPod Touch ' +
+                      'compatibility settings' + _def_str(opts['ipod'], True))
     viopts.add_option('--no-ipod', dest = 'ipod', action = 'store_false',
-                      help = 'do not use iPod compatibility settings')
+                      help = 'do not use iPod compatibility settings' +
+                      _def_str(opts['ipod'], False))
     viopts.add_option('--ipod-preset', dest = 'ipod_preset', metavar = 'PRE',
-                      default = 'ipod640', help = 'ffmpeg x264 preset to ' +
-                      'use for iPod Touch compatibility [default: %default]')
+                      default = opts['ipod_preset'], help = 'ffmpeg x264 ' +
+                      'preset to use for iPod Touch compatibility ' +
+                      '[default: %default]')
     parser.add_option_group(viopts)
     auopts = optparse.OptionGroup(parser, 'Audio encoding options')
     auopts.add_option('-n', '--nero', dest = 'nero', action = 'store_true',
-                      default = True, help = 'use NeroAacEnc (must be ' +
-                      'installed) [default]')
+                      default = opts['nero'], help = 'use NeroAacEnc (must ' +
+                      'be installed)' + _def_str(opts['nero'], True))
     auopts.add_option('-f', '--faac', dest = 'nero', action = 'store_false',
-                      help = 'use libfaac (must be linked into ffmpeg)')
+                      help = 'use libfaac (must be linked into ffmpeg)' +
+                      _def_str(opts['nero'], False))
     auopts.add_option('--audio-br', dest = 'audio_br', metavar = 'BR',
-                      type = 'int', default = 128, help = 'libfaac audio ' +
-                      'bitrate (in KB/s) [default: %default]')
+                      type = 'int', default = opts['audio_br'], help =
+                      'libfaac audio bitrate (in KB/s) [default: %default]')
     auopts.add_option('--audio-q', dest = 'audio_q', metavar = 'Q',
-                      type = 'float', default = 0.3, help = 'neroAacEnc ' +
-                      'audio quality ratio [default: %default]')
+                      type = 'float', default = opts['audio_q'], help =
+                      'neroAacEnc audio quality ratio [default: %default]')
     parser.add_option_group(auopts)
     mdopts = optparse.OptionGroup(parser, 'Metadata options')
     mdopts.add_option('--rating', dest = 'use_tvdb_rating',
-                      action = 'store_true', default = True,
+                      action = 'store_true', default = opts['use_tvdb_rating'],
                       help = 'include Tvdb episode rating (1 to 10) ' +
-                      'as voted by users [default]')
+                      'as voted by users' +
+                      _def_str(opts['use_tvdb_rating'], True))
     mdopts.add_option('--no-rating', dest = 'use_tvdb_rating',
                       action = 'store_false', help = 'do not include Tvdb ' +
-                      'episode rating')
-    mdopts.add_option('--tvdb-description', dest = 'prefer_tvdb_descriptions',
-                      action = 'store_true', default = False,
-                      help = 'prefer to use episode description from Tvdb ' +
-                      'when available')
+                      'episode rating' +
+                      _def_str(opts['use_tvdb_rating'], False))
+    mdopts.add_option('--tvdb-description', dest = 'use_tvdb_descriptions',
+                      action = 'store_true',
+                      default = opts['use_tvdb_descriptions'], help = 'use ' +
+                      'episode descriptions from Tvdb when available' +
+                      _def_str(opts['use_tvdb_descriptions'], True))
     parser.add_option_group(mdopts)
     myopts = optparse.OptionGroup(parser, 'MythTV options')
     myopts.add_option('--host', dest = 'host', metavar = 'IP',
-                      default = _HOST_DEFAULT, help = 'MythTV database ' +
+                      default = opts['host'], help = 'MythTV database ' +
                       'host [default: %default]')
     myopts.add_option('--database', dest = 'database', metavar = 'DB',
-                      default = _DB_DEFAULT, help = 'MySQL database for ' +
-                      'MythTV [default: %default]')
+                      default = opts['database'], help = 'MySQL database ' +
+                      'for MythTV [default: %default]')
     myopts.add_option('--user', dest = 'user', metavar = 'USER',
-                      default = _USER_DEFAULT, help = 'MySQL username for ' +
+                      default = opts['user'], help = 'MySQL username for ' +
                       'MythTV [default: %default]')
     myopts.add_option('--password', dest = 'password', metavar = 'PWD',
-                      default = _PASS_DEFAULT, help = 'MySQL password for ' +
-                      'MythTV [default: %default]')
+                      default = opts['password'], help = 'MySQL password ' +
+                      'for MythTV [default: %default]')
     myopts.add_option('--pin', dest = 'pin', metavar = 'PIN', type = 'int',
-                      default = 0, help = 'MythTV security PIN ' +
-                      '[default: 0000]')
+                      default = opts['pin'], help = 'MythTV security PIN ' +
+                      '[default: %04d]' % opts['pin'])
     parser.add_option_group(myopts)
     miopts = optparse.OptionGroup(parser, 'Miscellaneous options')
     miopts.add_option('-q', '--quiet', dest = 'quiet', action = 'store_true',
-                      default = False, help = 'avoid printing to stdout')
+                      default = opts['quiet'], help = 'avoid printing to ' +
+                      'stdout' + _def_str(opts['quiet'], True))
     miopts.add_option('-v', '--verbose', dest = 'verbose',
-                      action = 'store_true', default = False,
-                      help = 'print command output to stdout')
+                      action = 'store_true', default = opts['verbose'],
+                      help = 'print command output to stdout' +
+                      _def_str(opts['verbose'], True))
     miopts.add_option('--thresh', dest = 'thresh', metavar = 'TH',
-                      type = 'int', default = 5, help = 'avoid clipping ' +
-                      'commercials TH seconds from the beginning or end ' +
+                      type = 'int', default = opts['thresh'], help = 'ignore ' +
+                      'clip segments TH seconds from the beginning or end ' +
                       '[default: %default]')
     miopts.add_option('--project-x', dest = 'projectx', metavar = 'PATH',
-                      default = _PROJECTX_DEFAULT, help = 'path to the ' +
-                      'Project-X JAR file                              ' +
+                      default = opts['projectx'], help = 'path to the ' +
+                      'Project-X JAR file                            ' +
                       '(used for noise cleaning / cutting)')
     miopts.add_option('--remuxtool', dest = 'remuxtool', metavar = 'PATH',
-                      default = _REMUXTOOL_DEFAULT, help = 'path to ' +
-                      'remuxTool.jar                                ' +
+                      default = opts['remuxtool'], help = 'path to ' +
+                      'remuxTool.jar                               ' +
                       '(used for extracting MPEG-2 data from WTV files)')
     parser.add_option_group(miopts)
     return parser
@@ -1222,7 +1288,7 @@ class Source(dict):
                 if self.get('description') is None:
                     self['description'] = overview
                 elif overview is not None:
-                    if self.opts.prefer_tvdb_descriptions:
+                    if self.opts.use_tvdb_descriptions:
                         if len(self['description']) < len(overview):
                             self['description'] = overview
                 rating = ep.get('rating')
@@ -1276,7 +1342,7 @@ class Source(dict):
         final = os.path.join(self.opts.final_path,
                              os.path.split(self.base)[-1])
         if self.meta_present:
-            path = self.opts.final_format
+            path = self.opts.format
             tags = [('%T', 'title'), ('%S', 'subtitle'), ('%R', 'description'),
                     ('%C', 'category'), ('%n', 'syndicatedepisodenumber'),
                     ('%s', 'season'), ('%E', 'episode'), ('%r', 'rating')]
