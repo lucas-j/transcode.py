@@ -99,12 +99,13 @@ Special thanks to:
 # - easier installation: all required programs should be bundled
 
 # Known issues:
-# - subtitles seem to be out-of-sync
+# - subtitles seem to lead the audio after several commercial cuts
 # - subtitle font is sometimes too large on QuickTime / iTunes / iPods
+# - many Matroska players seem to have trouble displaying metadata
 
-import re, os, sys, math, datetime, subprocess, contextlib, threading
-import urllib, tempfile, glob, shutil, codecs, StringIO, time, optparse
-import unicodedata, logging, xml.dom.minidom
+import re, os, sys, math, datetime, subprocess, urllib, tempfile, glob
+import shutil, codecs, StringIO, time, optparse, unicodedata, logging
+import xml.dom.minidom
 import MythTV, MythTV.ttvdb.tvdb_api, MythTV.ttvdb.tvdb_exceptions
 
 def _clean(filename):
@@ -190,6 +191,12 @@ def _sanitize(filename, repl = None):
             out = regex.sub(repl, out)
     return out
 
+def _filter_xml(data):
+    'Filters unnecessary whitespace from the raw XML data provided.'
+    regex = '<([^/>]+)>\s*(.+)\s*</([^/>]+)>'
+    sub = '<\g<1>>\g<2></\g<3>>'
+    return re.sub(regex, sub, data)
+    
 def _cmd(args, cwd = None, expected = 0):
     '''Executes an external command with the given working directory, ignoring
     all output. Raises a RuntimeError exception if the return code of the
@@ -310,9 +317,10 @@ def _find_conf_file():
 def _get_defaults():
     'Returns configuration defaults for this program.'
     test = 'foo'
-    opts = {'final_path' : '/srv/video', 'tmp' : None, 'format' : '%T/%T - %S',
-            'replace_char' : '', 'language' : 'en', 'two_pass' : False,
-            'preset' : None, 'video_br' : 1500, 'video_crf' : 22,
+    opts = {'final_path' : '/srv/video', 'tmp' : None, 'matroska' : False,
+            'format' : '%T/%T - %S', 'replace_char' : '', 'language' : 'en',
+            'two_pass' : False, 'preset' : None, 'video_br' : 1500,
+            'video_crf' : 22, 'resolution' : None, 'ipod_resolution' : '480p',
             'ipod' : True, 'ipod_preset' : 'ipod640', 'nero' : True,
             'audio_br' : 128, 'audio_q' : 0.3, 'use_tvdb_rating' : True,
             'use_tvdb_descriptions' : False, 'host' : '127.0.0.1',
@@ -326,10 +334,10 @@ def _get_defaults():
 def _add_option(opts, key, val):
     'Inserts the given configuration setting into the dictionary.'
     key = key.lower()
-    if key in ['tmp', 'preset']:
+    if key in ['tmp', 'preset', 'resolution', 'ipod_resolution']:
         if val == '' or not val:
             val = None
-    if key in ['two_pass', 'ipod', 'nero', 'use_tvdb_rating',
+    if key in ['matroska', 'two_pass', 'ipod', 'nero', 'use_tvdb_rating',
                'use_tvdb_descriptions', 'quiet', 'verbose']:
         val = val.lower()
         if val in ['1', 't', 'y', 'true', 'yes', 'on']:
@@ -397,6 +405,13 @@ def _get_options():
         flopts.add_option('-t', '--tmp', dest = 'tmp', metavar = 'PATH',
                           help = 'temporary directory to be used while ' +
                           'transcoding [default: %s]' % tempfile.gettempdir())
+    flopts.add_option('--mkv', dest = 'matroska', action = 'store_true',
+                      default = opts['matroska'], help = 'use the Matroska ' +
+                      '(MKV) container format' +
+                      _def_str(opts['matroska'], True))
+    flopts.add_option('--mp4', dest = 'matroska', action = 'store_false',
+                      help = 'use the MPEG-4 (MP4 / M4V) container format' +
+                      _def_str(opts['matroska'], False))
     flopts.add_option('--format', dest = 'format',
                       default = opts['format'], metavar = 'FMT',
                       help = 'format string for the encoded video filename ' +
@@ -428,6 +443,9 @@ def _get_options():
                       type = 'int', default = opts['video_crf'],
                       help = 'one-pass target compression ratio (~15-25 is ' +
                       'ideal) [default: %default]')
+    viopts.add_option('-r', '--res', dest = 'resolution', metavar = 'RES',
+                      default = opts['resolution'], help = 'target video ' +
+                      'resolution or aspect ratio [default: %default]')
     viopts.add_option('--ipod', dest = 'ipod', action = 'store_true',
                       default = opts['ipod'], help = 'use iPod Touch ' +
                       'compatibility settings' + _def_str(opts['ipod'], True))
@@ -437,6 +455,10 @@ def _get_options():
     viopts.add_option('--ipod-preset', dest = 'ipod_preset', metavar = 'PRE',
                       default = opts['ipod_preset'], help = 'ffmpeg x264 ' +
                       'preset to use for iPod Touch compatibility ' +
+                      '[default: %default]')
+    viopts.add_option('--ipod-res', dest = 'ipod_resolution', metavar = 'RES',
+                      default = opts['ipod_resolution'], help = 'target ' +
+                      'video resolution for iPod Touch compatibility ' +
                       '[default: %default]')
     parser.add_option_group(viopts)
     auopts = optparse.OptionGroup(parser, 'Audio encoding options')
@@ -509,8 +531,9 @@ def _get_options():
     parser.add_option_group(miopts)
     return parser
 
-def _check_args(args, parser):
-    'Checks to ensure the positional arguments are valid.'
+def _check_args(args, parser, opts):
+    '''Checks to ensure the positional arguments are valid, and adjusts
+    conflicting options if necessary.'''
     if len(args) == 2:
         try:
             ts = _convert_time(args[1])
@@ -527,10 +550,22 @@ def _check_args(args, parser):
     else:
         parser.print_help()
         exit(1)
+    if opts.ipod:
+        if opts.matroska:
+            logger.warning('*** Using MPEG-4 for iPod Touch compatibility ***')
+        opts.matroska = False
+        opts.resolution = opts.ipod_resolution
+        opts.preset = opts.ipod_preset
+    loglvl = logging.INFO
+    if opts.verbose:
+        loglvl = logging.DEBUG
+    if opts.quiet:
+        loglvl = logging.CRITICAL
+    logging.basicConfig(format = '%(message)s', level = loglvl)
 
 class Subtitles:
     '''Extracts closed captions from source media using ccextractor and
-    embeds them as SRT subtitles using MP4Box.'''
+    writes them as SRT timed-text subtitles.'''
     subs = 1
     
     def __init__(self, source):
@@ -556,6 +591,13 @@ class Subtitles:
         _cmd(['ccextractor', '-o', self.srt, '-utf8', '-ve',
               '--no_progress_bar', video], expected = 232)
     
+    def clean_tmp(self):
+        'Removes temporary SRT files.'
+        _clean(self.srt)
+
+class MP4Subtitles(Subtitles):
+    'Embeds SRT subtitles into the final MPEG-4 video file.'
+    
     def write(self):
         'Invokes MP4Box to embed the SRT subtitles into a MP4 file.'
         if not self.enabled:
@@ -563,12 +605,16 @@ class Subtitles:
         arg = '%s:name=Subtitles:layout=0x125x0x-1' % self.srt
         _cmd(['MP4Box', '-tmp', self.source.opts.final_path, '-add',
               arg, self.source.mp4])
-    
-    def clean_tmp(self):
-        'Removes temporary SRT files.'
-        _clean(self.srt)
 
-class Chapters:
+class MKVSubtitles(Subtitles):
+    'Embeds SRT subtitles into the final MPEG-4 video file.'
+    
+    def write(self):
+        '''Returns command-line arguments for mkvmerge to embed the SRT
+        subtitles into a MKV file.'''
+        return ['--track-name', '0:Subtitles', self.srt]
+
+class MP4Chapters:
     'Creates iOS-style chapter markers between designated cutpoints.'
     
     def __init__(self, source):
@@ -604,6 +650,7 @@ class Chapters:
         the chapter XML file into a MP4 file.'''
         _clean(self._chap)
         data = self._doc.toprettyxml(encoding = 'UTF-8', indent = '  ')
+        data = _filter_xml(data)
         logging.debug('Chapter XML file:')
         logging.debug(data)
         with open(self._chap, 'w') as dest:
@@ -620,7 +667,42 @@ class Chapters:
         'Removes the temporary chapter XML file.'
         _clean(self._chap)
 
-class Metadata:
+class MKVChapters:
+    '''Creates a simple-format Matroska chapter file and embeds it into
+    the final MKV media file.'''
+    
+    def __init__(self, source):
+        self.source = source
+        self._chap = source.base + '.chap'
+        self._data = ''
+    
+    def add(self, pos, seg):
+        '''Adds a new chapter marker at pos (in seconds).
+        If seg is provided, the marker will be labelled 'Scene seg+1'.'''
+        if seg is None:
+            return
+        time = _seconds_to_time_frac(pos)
+        self._data += 'CHAPTER%02d=%s\n' % (seg, time)
+        self._data += 'CHAPTER%02dNAME=%s\n' % (seg, 'Scene %d' % (seg + 1))
+    
+    def write(self):
+        '''Writes the chapter file and returns command-line arguments to embed
+        the chapter date into a MKV file.'''
+        _clean(self._chap)
+        logging.debug('Chapter data file:')
+        logging.debug(self._data)
+        if len(self._data) > 0:
+            with open(self._chap, 'w') as dest:
+                dest.write(self._data)
+            return ['--chapters', self._chap]
+        else:
+            return []
+    
+    def clean_tmp(self):
+        'Removes the temporary chapter file.'
+        _clean(self._chap)
+
+class MP4Metadata:
     '''Translates previously fetched metadata (series name, episode name,
     episode number, credits...) into command-line arguments for AtomicParsley
     in order to embed it as iOS-compatible MP4 tags.'''
@@ -838,7 +920,7 @@ class MKVMetadata:
         n = self._doc.createElement('Name')
         n.appendChild(self._doc.createTextNode(name.upper()))
         simple.appendChild(n)
-        v = self._doc.createElement('Value')
+        v = self._doc.createElement('String')
         v.appendChild(self._doc.createTextNode(str(val)))
         simple.appendChild(v)
         tag.appendChild(simple)
@@ -856,14 +938,16 @@ class MKVMetadata:
             self._add_simple(self._show, 'title', self.source.get('title'))
         if self.source.get('category') is not None:
             self._add_simple(self._show, 'genre', self.source.get('category'))
+        if self.source.get('seasoncount') is not None:
+            self._add_simple(self._show, 'part_number',
+                             self.source.get('seasoncount'))
         if self.source.get('season') is not None:
             self._add_simple(self._season, 'part_number',
                              self.source.get('season'))
-        if self.source.get('seasoncount') is not None:
+        if self.source.get('episodecount') is not None:
             self._add_simple(self._season, 'total_parts',
-                             self.source.get('seasoncount'))
+                             self.source.get('episodecount'))
         tags = {'subtitle' : 'subtitle', 'episode' : 'part_number',
-                'episodecount' : 'total_parts',
                 'syndicatedepisodenumber' : 'catalog_number',
                 'channel' : 'distributed_by', 'description' : 'description',
                 'rating' : 'law_rating'}
@@ -871,7 +955,8 @@ class MKVMetadata:
             if self.source.get(key) is not None:
                 self._add_simple(self._ep, val, self.source.get(key))
         if self.source.get('popularity'):
-            popularity = self.source.get('popularity') / 51.0
+            popularity = self.source.get('popularity') / 51.0 * 2
+            popularity = round(popularity) / 2.0
             self._add_simple(self._ep, 'rating', popularity)
         self._add_date(self._ep, 'date_released',
                        self.source.get('originalairdate'))
@@ -896,16 +981,18 @@ class MKVMetadata:
                 self._add_simple(self._ep, 'written_by', person[0])
     
     def write(self, version):
-        '''Performs each of the above steps involved in embedding metadata,
-        using version as the encodingTool tag.'''
+        '''Writes the metadata XML file and returns command-line arguments to
+        mkvmerge in order to embed it, along with album artwork if available,
+        into the final MKV file.'''
         _clean(self._tags)
         if not self.enabled:
-            return ''
-        logging.info('*** Adding metadata to %s ***' % self.source.mp4)
+            return []
+        logging.info('*** Adding metadata to %s ***' % self.source.mkv)
         self._add_tags(version)
         self._credits()
         data = self._doc.toprettyxml(encoding = 'UTF-8', indent = '  ')
-        logging.debug('Chapter XML file:')
+        data = _filter_xml(data)
+        logging.debug('Tag XML file:')
         logging.debug(data)
         with open(self._tags, 'w') as dest:
             dest.write(data)
@@ -921,14 +1008,18 @@ class MKVMetadata:
         _clean(self._tags)
 
 class Transcoder:
-    '''Invokes tools necessary to extract, split, demux, encode, remux and
-    finalize the media into MPEG-4 format.'''
+    '''Base class which invokes tools necessary to extract, split, demux
+    and encode the media.'''
     seg = 0
+    _split = []
     _demuxed = []
     _demux_v = None
     _demux_a = None
     _frames = 0
     _extra = 0
+    subtitles = None
+    chapters = None
+    metadata = None
     
     def __init__(self, source, opts):
         self.source = source
@@ -936,11 +1027,8 @@ class Transcoder:
         self._join = source.base + '-join.ts'
         self._demux = source.base + '-demux'
         self._wav = source.base + '.wav'
-        self._h264 = source.base + '.h264'
-        self._aac = source.base + '.aac'
-        self.subtitles = Subtitles(source)
-        self.chapters = Chapters(source)
-        self.metadata = Metadata(source)
+        self.h264 = source.base + '.h264'
+        self.aac = source.base + '.aac'
         self.check()
     
     def check(self):
@@ -956,8 +1044,6 @@ class Transcoder:
                                '(Perhaps try using neroAacEnc?)')
         if self.opts.nero and not _nero_ver():
             raise RuntimeError('neroAacEnc is not installed.')
-        if not _ver(['MP4Box', '-version'], 'version\s*([0-9.DEV]+)'):
-            raise RuntimeError('MP4Box is not installed.')
         if not self.source.meta_present:
             self.metadata.enabled = False
     
@@ -971,7 +1057,9 @@ class Transcoder:
         self.chapters.add(elapsed, self.seg)
         args = ['ffmpeg', '-y', '-i', self.source.orig, '-ss', str(clip[0]),
                 '-t', str(clip[1] - clip[0])] + self.source.split_args[0]
-        args += ['%s-%d.ts' % (self.source.base, self.seg)]
+        split = '%s-%d.ts' % (self.source.base, self.seg)
+        args += [split]
+        self._split += split
         if len(self.source.split_args) > 1:
             args += self.source.split_args[1]
         _cmd(args)
@@ -1119,40 +1207,39 @@ class Transcoder:
         logging.debug('Demuxed audio: %s' % self._demux_a)
     
     def _adjust_res(self):
-        '''If the iPod-compatible flag is selected, adjusts the target
-        resolution to be exactly 640x480, preserving aspect ratio by padding
-        extra space with black pixels.'''
+        '''Adjusts the resolution of the transcoded video to be exactly the
+        desired target resolution (if one is chosen), preserving aspect ratio
+        by padding extra space with black pixels.'''
         size = []
         res = self.source.resolution
-        if self.opts.ipod:
+        target = self.opts.resolution
+        if target is not None:
             aspect = res[0] * 1.0 / res[1]
-            if aspect > 640.0 / 480.0:
-                vres = int(round(640.0 / aspect))
+            if aspect > target[0] / target[1]:
+                vres = int(round(target[0] / aspect))
                 if vres % 2 == 1:
                     vres += 1
-                pad = (480 - vres) / 2
-                size = ['-s', '640x%d' % vres, '-vf',
-                        'pad=640:480:0:%d:black' % pad]
+                pad = (target[1] - vres) / 2
+                size = ['-s', '%dx%d' % (target[0], vres), '-vf',
+                        'pad=%d:%d:0:%d:black' % (target[0], target[1], pad)]
             else:
-                hres = int(round(480.0 * aspect))
+                hres = int(round(target[1] * aspect))
                 if hres % 2 == 1:
                     hres += 1
-                pad = (640 - hres) / 2
-                size = ['-s', '%dx480' % hres, '-vf',
-                        'pad=640:480:%d:0:black' % pad]
+                pad = (target[0] - hres) / 2
+                size = ['-s', '%dx%d' % (hres, target[1]), '-vf',
+                        'pad=%d:%d:%d:0:black' % (target[0], target[1], pad)]
         return size
     
     def encode_video(self):
         'Invokes ffmpeg to transcode the video stream to H.264.'
-        _clean(self._h264)
+        _clean(self.h264)
         prof = []
         fmt = 'mp4'
         if self.opts.preset:
             prof = ['-vpre', self.opts.preset]
         if self.opts.ipod:
             fmt = 'ipod'
-            if self.opts.ipod_preset:
-                prof = ['-vpre', self.opts.ipod_preset]
         size = self._adjust_res()
         common = ['ffmpeg', '-y', '-i', self._demux_v, '-vcodec', 'libx264',
                   '-an', '-threads', 0, '-f', fmt] + prof + size
@@ -1163,43 +1250,26 @@ class Transcoder:
             _cmd(common + ['-pass', 1, os.devnull],
                  cwd = self.opts.tmp)
             logging.info(u'*** Encoding video to %s - second pass ***' %
-                         self._h264)
-            _cmd(common + ['-pass', 2, self._h264],
+                         self.h264)
+            _cmd(common + ['-pass', 2, self.h264],
                  cwd = self.opts.tmp)
         else:
-            logging.info(u'*** Encoding video to %s ***' % self._h264)
-            _cmd(common + ['-crf', self.opts.video_crf, self._h264])
+            logging.info(u'*** Encoding video to %s ***' % self.h264)
+            _cmd(common + ['-crf', self.opts.video_crf, self.h264])
     
     def encode_audio(self):
         'Invokes ffmpeg or neroAacEnc to transcode the audio stream to AAC.'
-        logging.info(u'*** Encoding audio to %s ***' % self._aac)
+        logging.info(u'*** Encoding audio to %s ***' % self.aac)
         if self.opts.nero:
             _cmd(['ffmpeg', '-y', '-i', self._demux_a, '-vn', '-acodec',
                   'pcm_s16le', '-f', 'wav', self._wav])
-            _clean(self._aac)
+            _clean(self.aac)
             _cmd(['neroAacEnc', '-q', self.opts.audio_q, '-if', self._wav,
-                  '-of', self._aac])
+                  '-of', self.aac])
         else:
             _cmd(['ffmpeg', '-y', '-i', self._demux_a, '-vn', '-acodec',
                   'libfaac', '-ab', '%dk' % self.opts.audio_br, '-f', 'aac',
-                  self._aac])
-    
-    def remux(self):
-        '''Invokes MP4Box to combine the audio, video and subtitle streams
-        into the MPEG-4 target file, also embedding chapter data and
-        metadata.'''
-        logging.info(u'*** Remuxing to %s ***' % self.source.mp4)
-        self.source.make_final_dir()
-        _clean(self.source.mp4)
-        common = ['MP4Box', '-tmp', self.opts.final_path]
-        _cmd(common + ['-new', '-add', '%s#video:name=Video' % self._h264,
-                       '-add', '%s#audio:name=Audio' % self._aac,
-                       self.source.mp4])
-        _cmd(common + ['-isma', '-hint', self.source.mp4])
-        self.subtitles.write()
-        self.chapters.write()
-        _cmd(common + ['-lang', self.opts.language, self.source.mp4])
-        self.metadata.write(_version(self.opts))
+                  self.aac])
     
     def clean_video(self):
         'Removes the temporary video stream data.'
@@ -1213,18 +1283,100 @@ class Transcoder:
         'Removes any temporary files generated during encoding.'
         self.clean_video()
         self.clean_audio()
-        for seg in xrange(0, self.seg):
-            _clean('%s-%d.ts' % (self.source.base, self.seg))
+        for split in self._split:
+            _clean(split)
         for demux in self._demuxed:
             _clean(demux)
         _clean(self._join)
         _clean(self._wav)
-        _clean(self._aac)
-        _clean(self._h264)
+        _clean(self.aac)
+        _clean(self.h264)
         for log in ['ffmpeg2pass-0.log', 'x264_2pass.log',
                     'x264_2pass.log.mbtree', '%s_log.txt' % self._demux,
                     '%s_log.txt' % self.source.base]:
             _clean(os.path.join(self.opts.tmp, log))
+
+class MP4Transcoder(Transcoder):
+    'Remuxes and finalizes MPEG-4 media files.'
+    
+    def __init__(self, source, opts):
+        Transcoder.__init__(self, source, opts)
+        self.subtitles = MP4Subtitles(source)
+        self.chapters = MP4Chapters(source)
+        self.metadata = MP4Metadata(source)
+        self.check()
+    
+    def check(self):
+        'Determines whether MP4Box is installed.'
+        if not _ver(['MP4Box', '-version'], 'version\s*([0-9.DEV]+)'):
+            raise RuntimeError('MP4Box is not installed.')
+        if not self.source.meta_present:
+            self.metadata.enabled = False
+    
+    def remux(self):
+        '''Invokes MP4Box to combine the audio, video and subtitle streams
+        into the MPEG-4 target file, also embedding chapter data and
+        metadata.'''
+        logging.info(u'*** Remuxing to %s ***' % self.source.mp4)
+        self.source.make_final_dir()
+        _clean(self.source.mp4)
+        common = ['MP4Box', '-tmp', self.opts.final_path]
+        _cmd(common + ['-new', '-add', '%s#video:name=Video' % self.h264,
+                       '-add', '%s#audio:name=Audio' % self.aac,
+                       self.source.mp4])
+        _cmd(common + ['-isma', '-hint', self.source.mp4])
+        self.subtitles.write()
+        self.chapters.write()
+        _cmd(common + ['-lang', self.opts.language, self.source.mp4])
+        self.metadata.write(_version(self.opts))
+    
+    def clean_tmp(self):
+        'Removes any temporary files generated during encoding.'
+        Transcoder.clean_tmp(self)
+        self.subtitles.clean_tmp()
+        self.chapters.clean_tmp()
+        self.metadata.clean_tmp()
+
+class MKVTranscoder(Transcoder):
+    'Remuxes and finalizes Matroska media files.'
+    
+    def __init__(self, source, opts):
+        Transcoder.__init__(self, source, opts)
+        self.subtitles = MKVSubtitles(source)
+        self.chapters = MKVChapters(source)
+        self.metadata = MKVMetadata(source)
+        self.check()
+    
+    def check(self):
+        'Determines whether mkvmerge is installed.'
+        if not _ver(['mkvmerge', '--version'], '\sv*([0-9.]+)'):
+            raise RuntimeError('mkvmerge is not installed.')
+        if not self.source.meta_present:
+            self.metadata.enabled = False
+    
+    def remux(self):
+        '''Invokes mkvmerge to combine the audio, video and subtitle streams
+        into the Matroska target file, also embedding chapter data and
+        metadata.'''
+        logging.info(u'*** Remuxing to %s ***' % self.source.mkv)
+        self.source.make_final_dir()
+        _clean(self.source.mkv)
+        common = ['--no-chapters', '-B', '-T', '-M', '--no-global-tags']
+        args = ['mkvmerge']
+        args += ['--default-language', _iso_639_2(self.opts.language)]
+        args += common + ['-A', '-S', '--track-name', '0:Video', self.h264]
+        args += common + ['-D', '-S', '--track-name', '0:Audio', self.aac]
+        subs = self.subtitles.write()
+        if len(subs) > 0:
+            args += common + ['-A', '-D'] + subs
+        args += self.chapters.write()
+        args += self.metadata.write(_version(self.opts))
+        args += ['-o', self.source.mkv]
+        _cmd(args)
+    
+    def clean_tmp(self):
+        'Removes any temporary files generated during encoding.'
+        Transcoder.clean_tmp(self)
         self.subtitles.clean_tmp()
         self.chapters.clean_tmp()
         self.metadata.clean_tmp()
@@ -1243,6 +1395,7 @@ class Source(dict):
     rating = None
     final = None
     mp4 = None
+    mkv = None
     meta_present = False
     split_args = None
     
@@ -1342,6 +1495,39 @@ class Source(dict):
             raise RuntimeError('No audio streams could be found.')
         self._check_split_args()
         return fps, resolution, duration, vstreams, astreams
+    
+    def parse_resolution(self, res):
+        '''Translates the user-specified target resolution string into a
+        width/height tuple using predefined resolution names like '1080p',
+        or aspect ratios like '4:3', and so on.'''
+        if res:
+            predefined = {'480p' : (640, 480), '480p60' : (720, 480),
+                          '720p' : (1280, 720), '1080p' : (1920, 1080)}
+            for key, val in predefined.iteritems():
+                if res == key:
+                    return val
+            match = re.match('(\d+)x(\d+)', res)
+            if match:
+                return (int(match.group(1)), int(match.group(2)))
+            match = re.match('(\d+):(\d+)', res)
+            if match:
+                aspect = float(match.group(1)) / float(match.group(2))
+                h = self.resolution[1]
+                w = int(round(h * aspect))
+                return (w, h)
+            if res == 'close' or res == 'closest':
+                (w, h) = self.resolution
+                aspect = w * 1.0 / h
+                closest = (-1920, -1080)
+                for val in predefined.itervalues():
+                    test = math.sqrt((val[0] - w) ** 2 + (val[1] - h) ** 2)
+                    curr = math.sqrt((closest[0] - w) ** 2 +
+                                     (closest[1] - h) ** 2)
+                    if test < curr:
+                        closest = val
+                return closest
+            logging.warning('*** Invalid resolution - %s ***' % res)
+        return None
     
     def _align_episode(self):
         '''Returns a string for the episode number padded by as many zeroes
@@ -1553,6 +1739,7 @@ class MythSource(Source):
         self._fetch_metadata()
         self.final = self.final_name()
         self.mp4 = '%s.%s' % (self.final, self.mp4ext)
+        self.mkv = self.final + '.mkv'
     
     def _frame_to_timecode(self, frame):
         '''Uses ffmpeg to remux a given number of frames in the video file
@@ -1632,6 +1819,7 @@ class MythSource(Source):
          self.vstreams, self.astreams) = self.video_params()
         if not self.fps or not self.resolution or not self.duration:
             raise RuntimeError('Could not determine video parameters.')
+        self.opts.resolution = self.parse_resolution(self.opts.resolution)
         self._cut_list()
 
 class WTVSource(Source):
@@ -1655,12 +1843,13 @@ class WTVSource(Source):
             b = self.channel + '_' + t
             self.base = os.path.join(opts.tmp, '%s_%s' % (self.channel, t))
         else:
-            f = os.path.split(wtv)[1]
+            f = os.path.split(wtv)[-1]
             self.base = os.path.join(opts.tmp, os.path.splitext(f)[0])
         self.orig = self.base + '-orig.ts'
         self._fetch_metadata()
         self.final = self.final_name()
         self.mp4 = '%s.%s' % (self.final, self.mp4ext)
+        self.mkv = self.final + '.mkv'
     
     def _cut_list(self):
         '''Obtains a commercial-skip cutlist from previously generated
@@ -1710,8 +1899,6 @@ class WTVSource(Source):
         tags = []
         tags.append((re.compile('service_provider' + val), 'channel'))
         tags.append((re.compile('service_name' + val), 'channel'))
-        #tags.append((re.compile('WM/MediaNetworkAffiliation' + val),
-        #             'channel'))
         tags.append((re.compile('\s+Title' + val), 'title'))
         tags.append((re.compile('WM/SubTitle' + val), 'subtitle'))
         tags.append((re.compile('WM/SubTitleDescription' + val),
@@ -1754,19 +1941,14 @@ class WTVSource(Source):
          self.vstreams, self.astreams) = self.video_params()
         if not self.fps or not self.resolution or not self.duration:
             raise RuntimeError('Could not determine video parameters.')
+        self.opts.resolution = self.parse_resolution(self.opts.resolution)
         self._cut_list()
 
 if __name__ == '__main__':
     sys.stdout = codecs.getwriter('utf8')(sys.stdout)
     parser = _get_options()
     (opts, args) = parser.parse_args()
-    _check_args(args, parser)
-    loglvl = logging.INFO
-    if opts.verbose:
-        loglvl = logging.DEBUG
-    if opts.quiet:
-        loglvl = logging.CRITICAL
-    logging.basicConfig(format = '%(message)s', level = loglvl)
+    _check_args(args, parser, opts)
     s = None
     if len(args) == 1:
         wtv = args[0]
@@ -1777,18 +1959,21 @@ if __name__ == '__main__':
         s = MythSource(channel, timecode, opts)
     s.copy()
     s.print_metadata()
-    t = Transcoder(s, opts)
+    if opts.matroska:
+        t = MKVTranscoder(s, opts)
+    else:
+        t = MP4Transcoder(s, opts)
     t.split()
     t.join()
     t.demux()
-    #s.clean_copy()
+    s.clean_copy()
     t.encode_audio()
-    #t.clean_audio()
+    t.clean_audio()
     t.encode_video()
-    #t.clean_video()
+    t.clean_video()
     t.remux()
-    #t.clean_tmp()
-    #s.clean_tmp()
+    t.clean_tmp()
+    s.clean_tmp()
 
 # Copyright (c) 2012, Lucas Jacobs
 # All rights reserved.
