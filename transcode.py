@@ -221,7 +221,7 @@ def _ver(args, regex, use_stderr = True):
             for line in proc.stdout:
                 match = re.search(regex, line)
                 if match:
-                    ret = match.group(1)
+                    ret = match.group(1).strip()
                     break
             for line in proc.stdout:
                 pass
@@ -661,7 +661,7 @@ class Metadata:
         producers = []
         c = self.source.get('credits')
         for person in c:
-            if person[1] in ['actor', 'host']:
+            if person[1] in ['actor', 'host', '']:
                 cast.append(person[0])
             elif person[1] == 'director':
                 directors.append(person[0])
@@ -729,9 +729,11 @@ class Metadata:
     def _simple_tags(self, version):
         'Adds single-argument or standalone tags into the MP4 file.'
         s = self.source
-        utc = s.time.strftime('%Y-%m-%dT%H:%M:%SZ')
         args = ['--stik', 'TV Show', '--encodingTool', version,
-                '--purchaseDate', utc, '--grouping', 'MythTV Recording']
+                '--grouping', 'MythTV Recording']
+        if s.get('time') is not None:
+            utc = s.time.strftime('%Y-%m-%dT%H:%M:%SZ')
+            args += ['--purchaseDate', utc]
         if s.get('title') is not None:
             t = s['title']
             args += ['--artist', t, '--album', t, '--albumArtist', t,
@@ -795,6 +797,128 @@ class Metadata:
         files = u'%s-temp-*.%s' % (self.source.final, self.source.mp4ext)
         for old in glob.glob(files):
             _clean(old)
+
+class MKVMetadata:
+    '''Translates previously fetched metadata (series name, episode name,
+    episode number, credits...) into an XML tags file for mkvmerge
+    in order to embed it as Matroska tags.'''
+    
+    def __init__(self, source):
+        self.source = source
+        self.enabled = True
+        self._tags = self.source.base + '-tags.xml'
+        imp = xml.dom.minidom.getDOMImplementation()
+        url = 'http://www.matroska.org/files/tags/matroskatags.dtd'
+        dt = imp.createDocumentType('Tags', None, url)
+        self._doc = imp.createDocument(url, 'Tags', dt)
+        self._root = self._doc.documentElement
+        self._show = self._make_tag('collection', 70)
+        self._season = self._make_tag('season', 60)
+        self._ep = self._make_tag('episode', 50)
+    
+    def _make_tag(self, targtype, targval):
+        '''Creates an XML branch for Matroska tags using the desired level
+        of specificity to which the included tags will apply.'''
+        tag = self._doc.createElement('Tag')
+        targ = self._doc.createElement('Targets')
+        tv = self._doc.createElement('TargetTypeValue')
+        tv.appendChild(self._doc.createTextNode(str(targval)))
+        targ.appendChild(tv)
+        tt = self._doc.createElement('TargetType')
+        tt.appendChild(self._doc.createTextNode(targtype.upper()))
+        targ.appendChild(tt)
+        tag.appendChild(targ)
+        self._root.appendChild(tag)
+        return tag
+    
+    def _add_simple(self, tag, name, val):
+        '''Creates an XML Matroska <Simple> tag with the specified name
+        and value and attaches it to the given tag.'''
+        simple = self._doc.createElement('Simple')
+        n = self._doc.createElement('Name')
+        n.appendChild(self._doc.createTextNode(name.upper()))
+        simple.appendChild(n)
+        v = self._doc.createElement('Value')
+        v.appendChild(self._doc.createTextNode(str(val)))
+        simple.appendChild(v)
+        tag.appendChild(simple)
+    
+    def _add_date(self, tag, name, date):
+        '''Translates a datetime object into a UTC timestamp and adds it to
+        the specified XML tag.'''
+        if date is not None:
+            self._add_simple(tag, name, date.strftime('%Y-%m-%d'))
+    
+    def _add_tags(self, version):
+        'Adds most simple metadata tags to the XML tree.'
+        utc = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if self.source.get('title') is not None:
+            self._add_simple(self._show, 'title', self.source.get('title'))
+        if self.source.get('category') is not None:
+            self._add_simple(self._show, 'genre', self.source.get('category'))
+        if self.source.get('season') is not None:
+            self._add_simple(self._season, 'part_number',
+                             self.source.get('season'))
+        if self.source.get('seasoncount') is not None:
+            self._add_simple(self._season, 'total_parts',
+                             self.source.get('seasoncount'))
+        tags = {'subtitle' : 'subtitle', 'episode' : 'part_number',
+                'episodecount' : 'total_parts',
+                'syndicatedepisodenumber' : 'catalog_number',
+                'channel' : 'distributed_by', 'description' : 'description',
+                'rating' : 'law_rating'}
+        for key, val in tags.iteritems():
+            if self.source.get(key) is not None:
+                self._add_simple(self._ep, val, self.source.get(key))
+        if self.source.get('popularity'):
+            popularity = self.source.get('popularity') / 51.0
+            self._add_simple(self._ep, 'rating', popularity)
+        self._add_date(self._ep, 'date_released',
+                       self.source.get('originalairdate'))
+        self._add_date(self._ep, 'date_recorded', self.source.time)
+        self._add_simple(self._ep, 'date_encoded', utc)
+        self._add_simple(self._ep, 'date_tagged', utc)
+        self._add_simple(self._ep, 'encoder', version)
+        self._add_simple(self._ep, 'fps', self.source.fps)
+    
+    def _credits(self):
+        'Adds a list of credited people into the XML tree.'
+        for person in self.source.get('credits'):
+            if person[1] in ['actor', 'host', 'guest_star', '']:
+                self._add_simple(self._ep, 'actor', person[0])
+            elif person[1] == 'director':
+                self._add_simple(self._ep, 'director', person[0])
+            elif person[1] == 'executive_producer':
+                self._add_simple(self._ep, 'executive_producer', person[0])
+            elif person[1] == 'producer':
+                self._add_simple(self._ep, 'producer', person[0])
+            elif person[1] == 'writer':
+                self._add_simple(self._ep, 'written_by', person[0])
+    
+    def write(self, version):
+        '''Performs each of the above steps involved in embedding metadata,
+        using version as the encodingTool tag.'''
+        _clean(self._tags)
+        if not self.enabled:
+            return ''
+        logging.info('*** Adding metadata to %s ***' % self.source.mp4)
+        self._add_tags(version)
+        self._credits()
+        data = self._doc.toprettyxml(encoding = 'UTF-8', indent = '  ')
+        logging.debug('Chapter XML file:')
+        logging.debug(data)
+        with open(self._tags, 'w') as dest:
+            dest.write(data)
+        args = ['--global-tags', self._tags]
+        if self.source.get('albumart') is not None:
+            args += ['--attachment-description', 'Episode preview']
+            args += ['--attachment-mime-type', 'image/jpeg']
+            args += ['--attach-file', self.source.get('albumart')]
+        return args
+    
+    def clean_tmp(self):
+        'Removes the XML tags file if it exists.'
+        _clean(self._tags)
 
 class Transcoder:
     '''Invokes tools necessary to extract, split, demux, encode, remux and
@@ -1207,8 +1331,8 @@ class Source(dict):
                     minute = int(match.group(2))
                     sec = int(match.group(3))
                     frac = int(match.group(4))
-                    duration = hour * 3600 + minute * 60 + sec + \
-                        frac / (10. ** len(match.group(4)))
+                    duration = hour * 3600 + minute * 60 + sec
+                    duration += frac / (10. ** len(match.group(4)))
             proc.wait()
         except OSError:
             raise RuntimeError('FFmpeg is not installed.')
@@ -1229,8 +1353,8 @@ class Source(dict):
             ep = ''
         if self.get('episodecount') is None:
             return ep
-        field = int(math.ceil(math.log(self['episodecount']) /
-                              math.log(10)))
+        lg = math.log(self['episodecount']) / math.log(10)
+        field = int(math.ceil(lg))
         return ('%0' + str(field) + 'd') % ep
     
     def _find_episode(self, show):
