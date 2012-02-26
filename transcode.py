@@ -330,12 +330,13 @@ def _find_conf_file():
 
 def _get_defaults():
     'Returns configuration defaults for this program.'
-    test = 'foo'
     opts = {'final_path' : '/srv/video', 'tmp' : None, 'matroska' : False,
             'format' : '%T/%T - %S', 'replace_char' : '', 'language' : 'en',
-            'two_pass' : False, 'preset' : None, 'video_br' : 1500,
-            'video_crf' : 22, 'resolution' : None, 'ipod_resolution' : '480p',
-            'ipod' : True, 'ipod_preset' : 'ipod640', 'nero' : True,
+            'vp8' : False, 'two_pass' : False, 'preset' : None,
+            'video_br' : 1500, 'video_crf' : 22, 'resolution' : None,
+            'ipod' : False, 'webm' : False, 'ipod_resolution' : '480p',
+            'ipod_preset' : 'ipod640', 'webm_resolution' : '720p',
+            'webm_preset' : '720p', 'nero' : True, 'flac' : False,
             'audio_br' : 128, 'audio_q' : 0.3, 'use_tvdb_rating' : True,
             'use_tvdb_descriptions' : False, 'host' : '127.0.0.1',
             'database' : 'mythconverg', 'user' : 'mythtv',
@@ -348,11 +349,12 @@ def _get_defaults():
 def _add_option(opts, key, val):
     'Inserts the given configuration setting into the dictionary.'
     key = key.lower()
-    if key in ['tmp', 'preset', 'resolution', 'ipod_resolution']:
+    if key in ['tmp', 'preset', 'resolution', 'ipod_preset',
+               'ipod_resolution', 'webm_preset', 'webm_resolution']:
         if val == '' or not val:
             val = None
-    if key in ['matroska', 'two_pass', 'ipod', 'nero', 'use_tvdb_rating',
-               'use_tvdb_descriptions', 'quiet', 'verbose']:
+    if key in ['matroska', 'vp8', 'two_pass', 'webm', 'ipod', 'nero', 'flac',
+               'use_tvdb_rating', 'use_tvdb_descriptions', 'quiet', 'verbose']:
         val = val.lower()
         if val in ['1', 't', 'y', 'true', 'yes', 'on']:
             val = True
@@ -419,13 +421,6 @@ def _get_options():
         flopts.add_option('-t', '--tmp', dest = 'tmp', metavar = 'PATH',
                           help = 'temporary directory to be used while ' +
                           'transcoding [default: %s]' % tempfile.gettempdir())
-    flopts.add_option('--mkv', dest = 'matroska', action = 'store_true',
-                      default = opts['matroska'], help = 'use the Matroska ' +
-                      '(MKV) container format' +
-                      _def_str(opts['matroska'], True))
-    flopts.add_option('--mp4', dest = 'matroska', action = 'store_false',
-                      help = 'use the MPEG-4 (MP4 / M4V) container format' +
-                      _def_str(opts['matroska'], False))
     flopts.add_option('--format', dest = 'format',
                       default = opts['format'], metavar = 'FMT',
                       help = 'format string for the encoded video filename ' +
@@ -438,6 +433,33 @@ def _get_options():
                       default = opts['language'], metavar = 'LANG',
                       help = 'two-letter language code [default: %default]')
     parser.add_option_group(flopts)
+    vfopts = optparse.OptionGroup(parser, 'Video format options')
+    vfopts.add_option('--mp4', dest = 'matroska', action = 'store_false',
+                      help = 'use the MPEG-4 (MP4 / M4V) container format' +
+                      _def_str(opts['matroska'], False))
+    vfopts.add_option('--mkv', dest = 'matroska', action = 'store_true',
+                      default = opts['matroska'], help = 'use the Matroska ' +
+                      '(MKV) container format' +
+                      _def_str(opts['matroska'], True))
+    vfopts.add_option('--h264', dest = 'vp8', action = 'store_false',
+                      default = opts['vp8'], help = 'use H.264/MPEG-4 AVC ' +
+                      'and AAC' + _def_str(opts['vp8'], False))
+    vfopts.add_option('--vp8', dest = 'vp8', action = 'store_true',
+                      default = opts['vp8'], help = 'use On2\'s VP8 codec ' +
+                      'and Ogg Vorbis' + _def_str(opts['vp8'], True))
+    vfopts.add_option('--ipod', dest = 'ipod', action = 'store_true',
+                      default = opts['ipod'], help = 'use iPod Touch ' +
+                      'compatibility settings' + _def_str(opts['ipod'], True))
+    vfopts.add_option('--no-ipod', dest = 'ipod', action = 'store_false',
+                      help = 'do not use iPod compatibility settings' +
+                      _def_str(opts['ipod'], False))
+    vfopts.add_option('--webm', dest = 'webm', action = 'store_true',
+                      default = opts['webm'], help = 'encode WebM ' +
+                      'compliant video' + _def_str(opts['webm'], True))
+    vfopts.add_option('--no-webm', dest = 'webm', action = 'store_false',
+                      help = 'do not encode WebM compliant video' +
+                      _def_str(opts['webm'], False))
+    parser.add_option_group(vfopts)
     viopts = optparse.OptionGroup(parser, 'Video encoding options')
     viopts.add_option('-1', '--one-pass', dest = 'two_pass',
                       action = 'store_false', default = opts['two_pass'],
@@ -446,9 +468,6 @@ def _get_options():
     viopts.add_option('-2', '--two-pass', dest = 'two_pass',
                       action = 'store_true', help = 'two-pass encoding' +
                       _def_str(opts['two_pass'], True))
-    viopts.add_option('-p', '--preset', dest = 'preset', metavar = 'PRE',
-                      default = opts['preset'], help = 'ffmpeg x264 preset ' +
-                      'to use [default: %default]')
     viopts.add_option('--video-br', dest = 'video_br', metavar = 'BR',
                       type = 'int', default = opts['video_br'],
                       help = 'two-pass target video bitrate (in KB/s) ' +
@@ -457,15 +476,12 @@ def _get_options():
                       type = 'int', default = opts['video_crf'],
                       help = 'one-pass target compression ratio (~15-25 is ' +
                       'ideal) [default: %default]')
+    viopts.add_option('-p', '--preset', dest = 'preset', metavar = 'PRE',
+                      default = opts['preset'], help = 'ffmpeg x264 preset ' +
+                      'to use [default: %default]')
     viopts.add_option('-r', '--res', dest = 'resolution', metavar = 'RES',
                       default = opts['resolution'], help = 'target video ' +
                       'resolution or aspect ratio [default: %default]')
-    viopts.add_option('--ipod', dest = 'ipod', action = 'store_true',
-                      default = opts['ipod'], help = 'use iPod Touch ' +
-                      'compatibility settings' + _def_str(opts['ipod'], True))
-    viopts.add_option('--no-ipod', dest = 'ipod', action = 'store_false',
-                      help = 'do not use iPod compatibility settings' +
-                      _def_str(opts['ipod'], False))
     viopts.add_option('--ipod-preset', dest = 'ipod_preset', metavar = 'PRE',
                       default = opts['ipod_preset'], help = 'ffmpeg x264 ' +
                       'preset to use for iPod Touch compatibility ' +
@@ -473,6 +489,14 @@ def _get_options():
     viopts.add_option('--ipod-res', dest = 'ipod_resolution', metavar = 'RES',
                       default = opts['ipod_resolution'], help = 'target ' +
                       'video resolution for iPod Touch compatibility ' +
+                      '[default: %default]')
+    viopts.add_option('--webm-preset', dest = 'webm_preset', metavar = 'PRE',
+                      default = opts['webm_preset'], help = 'ffmpeg libvpx ' +
+                      'preset to use for WebM video ' +
+                      '[default: %default]')
+    viopts.add_option('--webm-res', dest = 'webm_resolution', metavar = 'RES',
+                      default = opts['webm_resolution'], help = 'target ' +
+                      'video resolution for WebM video ' +
                       '[default: %default]')
     parser.add_option_group(viopts)
     auopts = optparse.OptionGroup(parser, 'Audio encoding options')
@@ -482,9 +506,16 @@ def _get_options():
     auopts.add_option('-f', '--faac', dest = 'nero', action = 'store_false',
                       help = 'use libfaac (must be linked into ffmpeg)' +
                       _def_str(opts['nero'], False))
+    auopts.add_option('--vorbis', dest = 'flac', action = 'store_false',
+                      default = opts['flac'], help = 'use Ogg Vorbis audio ' +
+                      '(MKV only)' + _def_str(opts['flac'], False))
+    auopts.add_option('--flac', dest = 'flac', action = 'store_true',
+                      help = 'use FLAC audio (MKV only)' +
+                      _def_str(opts['flac'], True))
     auopts.add_option('--audio-br', dest = 'audio_br', metavar = 'BR',
                       type = 'int', default = opts['audio_br'], help =
-                      'libfaac audio bitrate (in KB/s) [default: %default]')
+                      'faac / vorbis audio bitrate (in KB/s) ' +
+                      '[default: %default]')
     auopts.add_option('--audio-q', dest = 'audio_q', metavar = 'Q',
                       type = 'float', default = opts['audio_q'], help =
                       'neroAacEnc audio quality ratio [default: %default]')
@@ -564,13 +595,23 @@ def _check_args(args, parser, opts):
     else:
         parser.print_help()
         exit(1)
+    if opts.ipod and opts.webm:
+        print 'Error: WebM and iPod options conflict.'
+        exit(1)
+    if (opts.vp8 or opts.flac or opts.webm) and not opts.matroska:
+        opts.matroska = True
     if opts.ipod:
-        if opts.matroska:
-            logging.warning('*** Using MPEG-4 for ' +
-                            'iPod Touch compatibility ***')
         opts.matroska = False
+        opts.vp8 = False
+        opts.flac = False
         opts.resolution = opts.ipod_resolution
         opts.preset = opts.ipod_preset
+    if opts.webm:
+        opts.matroska = True
+        opts.vp8 = True
+        opts.flac = False
+        opts.resolution = opts.webm_resolution
+        opts.preset = opts.webm_preset
     loglvl = logging.INFO
     if opts.verbose:
         loglvl = logging.DEBUG
@@ -1066,15 +1107,17 @@ class Transcoder:
     '''Base class which invokes tools necessary to extract, split, demux
     and encode the media.'''
     seg = 0
+    video = ''
+    audio = ''
+    subtitles = None
+    chapters = None
+    metadata = None
     _split = []
     _demuxed = []
     _demux_v = None
     _demux_a = None
     _frames = 0
     _extra = 0
-    subtitles = None
-    chapters = None
-    metadata = None
     
     def __init__(self, source, opts):
         self.source = source
@@ -1082,8 +1125,11 @@ class Transcoder:
         self._join = source.base + '-join.ts'
         self._demux = source.base + '-demux'
         self._wav = source.base + '.wav'
-        self.h264 = source.base + '.h264'
-        self.aac = source.base + '.aac'
+        self._h264 = source.base + '.h264'
+        self._vp8 = source.base + '.vp8'
+        self._aac = source.base + '.aac'
+        self._ogg = source.base + '.ogg'
+        self._flac = source.base + '.flac'
         self.check()
     
     def check(self):
@@ -1092,13 +1138,22 @@ class Transcoder:
         codecs = ['ffmpeg', '-codecs']
         if not _ffmpeg_ver():
             raise RuntimeError('FFmpeg is not installed.')
-        if not _ver(codecs, '--enable-(libx264)'):
+        if not self.opts.vp8 and not _ver(codecs, '--enable-(libx264)'):
             raise RuntimeError('FFmpeg does not support libx264.')
-        if not self.opts.nero and not _ver(codecs, '--enable-(libfaac)'):
+        if self.opts.vp8 and not _ver(codecs, '--enable-(libvpx)'):
+            raise RuntimeError('FFmpeg does not support libvpx.')
+        if self.opts.nero:
+            if not _nero_ver():
+                raise RuntimeError('neroAacEnc is not installed.')
+        elif self.opts.flac:
+            if not _ver(codecs, 'EA.*(flac)'):
+                raise RuntimeError('FFmpeg does not support FLAC.')
+        elif self.opts.vp8:
+            if not _ver(codecs, '--enable-(libvorbis)'):
+                raise RuntimeError('FFmpeg does not support libvorbis.')
+        elif not _ver(codecs, '--enable-(libfaac)'):
             raise RuntimeError('FFmpeg does not support libfaac. ' +
                                '(Perhaps try using neroAacEnc?)')
-        if self.opts.nero and not _nero_ver():
-            raise RuntimeError('neroAacEnc is not installed.')
         if not self.source.meta_present:
             self.metadata.enabled = False
     
@@ -1289,16 +1344,22 @@ class Transcoder:
         return size
     
     def encode_video(self):
-        'Invokes ffmpeg to transcode the video stream to H.264.'
-        _clean(self.h264)
+        'Invokes ffmpeg to transcode the video stream to H.264 or VP8.'
         prof = []
-        fmt = 'mp4'
+        (fmt, codec, target) = ('', '', '')
         if self.opts.preset:
             prof = ['-vpre', self.opts.preset]
         if self.opts.ipod:
-            fmt = 'ipod'
+            (fmt, codec, target) = ('ipod', 'libx264', self._h264)
+        elif self.opts.webm:
+            (fmt, codec, target) = ('webm', 'libvpx', self._vp8)
+        elif self.opts.vp8:
+            (fmt, codec, target) = ('matroska', 'libvpx', self._vp8)
+        else:
+            (fmt, codec, target) = ('mp4', 'libx264', self._h264)
+        _clean(target)
         size = self._adjust_res()
-        common = ['ffmpeg', '-y', '-i', self._demux_v, '-vcodec', 'libx264',
+        common = ['ffmpeg', '-y', '-i', self._demux_v, '-vcodec', codec,
                   '-an', '-threads', 0, '-f', fmt] + prof + size
         if self.opts.two_pass:
             logging.info(u'*** Encoding video to %s - first pass ***' %
@@ -1307,26 +1368,36 @@ class Transcoder:
             _cmd(common + ['-pass', 1, os.devnull],
                  cwd = self.opts.tmp)
             logging.info(u'*** Encoding video to %s - second pass ***' %
-                         self.h264)
-            _cmd(common + ['-pass', 2, self.h264],
+                         target)
+            _cmd(common + ['-pass', 2, target],
                  cwd = self.opts.tmp)
         else:
-            logging.info(u'*** Encoding video to %s ***' % self.h264)
-            _cmd(common + ['-crf', self.opts.video_crf, self.h264])
+            logging.info(u'*** Encoding video to %s ***' % target)
+            _cmd(common + ['-crf', self.opts.video_crf, target])
+        self.video = target
     
     def encode_audio(self):
-        'Invokes ffmpeg or neroAacEnc to transcode the audio stream to AAC.'
-        logging.info(u'*** Encoding audio to %s ***' % self.aac)
-        if self.opts.nero:
+        '''Invokes ffmpeg or neroAacEnc to transcode the audio stream to
+        AAC, Vorbis or FLAC.'''
+        (fmt, codec, target) = ('', '', '')
+        if self.opts.flac:
+            (fmt, codec, target) = ('flac', 'flac', self._flac)
+        elif self.opts.vp8:
+            (fmt, codec, target) = ('ogg', 'libvorbis', self._ogg)
+        else:
+            (fmt, codec, target) = ('aac', 'libfaac', self._aac)
+        _clean(target)
+        logging.info(u'*** Encoding audio to %s ***' % target)
+        if fmt == 'aac' and self.opts.nero:
             _cmd(['ffmpeg', '-y', '-i', self._demux_a, '-vn', '-acodec',
                   'pcm_s16le', '-f', 'wav', self._wav])
-            _clean(self.aac)
             _cmd(['neroAacEnc', '-q', self.opts.audio_q, '-if', self._wav,
-                  '-of', self.aac])
+                  '-of', target])
         else:
             _cmd(['ffmpeg', '-y', '-i', self._demux_a, '-vn', '-acodec',
-                  'libfaac', '-ab', '%dk' % self.opts.audio_br, '-f', 'aac',
-                  self.aac])
+                  codec, '-ab', '%dk' % self.opts.audio_br, '-f', fmt,
+                  target])
+        self.audio = target
     
     def clean_video(self):
         'Removes the temporary video stream data.'
@@ -1346,8 +1417,8 @@ class Transcoder:
             _clean(demux)
         _clean(self._join)
         _clean(self._wav)
-        _clean(self.aac)
-        _clean(self.h264)
+        _clean(self.video)
+        _clean(self.audio)
         for log in ['ffmpeg2pass-0.log', 'x264_2pass.log',
                     'x264_2pass.log.mbtree', '%s_log.txt' % self._demux,
                     '%s_log.txt' % self.source.base]:
@@ -1378,8 +1449,8 @@ class MP4Transcoder(Transcoder):
         self.source.make_final_dir()
         _clean(self.source.mp4)
         common = ['MP4Box', '-tmp', self.opts.final_path]
-        _cmd(common + ['-new', '-add', '%s#video:name=Video' % self.h264,
-                       '-add', '%s#audio:name=Audio' % self.aac,
+        _cmd(common + ['-new', '-add', '%s#video:name=Video' % self.video,
+                       '-add', '%s#audio:name=Audio' % self.audio,
                        self.source.mp4])
         _cmd(common + ['-isma', '-hint', self.source.mp4])
         self.subtitles.write()
@@ -1421,8 +1492,8 @@ class MKVTranscoder(Transcoder):
         common = ['--no-chapters', '-B', '-T', '-M', '--no-global-tags']
         args = ['mkvmerge']
         args += ['--default-language', _iso_639_2(self.opts.language)]
-        args += common + ['-A', '-S', '--track-name', '0:Video', self.h264]
-        args += common + ['-D', '-S', '--track-name', '0:Audio', self.aac]
+        args += common + ['-A', '-S', '--track-name', '0:Video', self.video]
+        args += common + ['-D', '-S', '--track-name', '0:Audio', self.audio]
         subs = self.subtitles.write()
         if len(subs) > 0:
             args += common + ['-A', '-D'] + subs
