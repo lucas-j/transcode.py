@@ -128,17 +128,27 @@ def _convert_time(time):
         raise ValueError('Invalid timestamp.')
     return ret
 
+def _convert_timestamp(ts):
+    '''Translates the values from a regex match for two timestamps of the
+    form 00:12:34,567 into seconds.'''
+    start = int(ts.group(1)) * 3600 + int(ts.group(2)) * 60
+    start += int(ts.group(3))
+    start += float(ts.group(4)) / 10 ** len(ts.group(4))
+    end = int(ts.group(5)) * 3600 + int(ts.group(6)) * 60
+    end += int(ts.group(7))
+    end += float(ts.group(8)) / 10 ** len(ts.group(8))
+    return start, end
+
 def _seconds_to_time(sec):
     '''Returns a string representation of the length of time provided.
     For example, 3675.14 -> '01:01:15' '''
-    sec = sec
     hours = int(sec / 3600)
     sec -= hours * 3600
     minutes = int(sec / 60)
     sec -= minutes * 60
     return '%02d:%02d:%02d' % (hours, minutes, sec)
 
-def _seconds_to_time_frac(sec):
+def _seconds_to_time_frac(sec, comma = False):
     '''Returns a string representation of the length of time provided,
     including partial seconds.
     For example, 3675.14 -> '01:01:15.140000' '''
@@ -146,7 +156,11 @@ def _seconds_to_time_frac(sec):
     sec -= hours * 3600
     minutes = int(sec / 60)
     sec -= minutes * 60
-    return '%02d:%02d:%07.4f' % (hours, minutes, sec)
+    if comma:
+        frac = int(round(sec % 1.0 * 1000))
+        return '%02d:%02d:%02d,%03d' % (hours, minutes, sec, frac)
+    else:
+        return '%02d:%02d:%07.4f' % (hours, minutes, sec)
 
 def _last_name_first(name):
     '''Reverses the order of full names of people, so their last name
@@ -552,7 +566,8 @@ def _check_args(args, parser, opts):
         exit(1)
     if opts.ipod:
         if opts.matroska:
-            logger.warning('*** Using MPEG-4 for iPod Touch compatibility ***')
+            logging.warning('*** Using MPEG-4 for ' +
+                            'iPod Touch compatibility ***')
         opts.matroska = False
         opts.resolution = opts.ipod_resolution
         opts.preset = opts.ipod_preset
@@ -567,6 +582,7 @@ class Subtitles:
     '''Extracts closed captions from source media using ccextractor and
     writes them as SRT timed-text subtitles.'''
     subs = 1
+    marks = []
     
     def __init__(self, source):
         self.source = source
@@ -582,6 +598,10 @@ class Subtitles:
         ver = _ver(['ccextractor'], '(CCExtractor [0-9]+\.[0-9]+),')
         return ver is not None
     
+    def mark(self, sec):
+        'Marks a cutpoint in the video at a given point.'
+        self.marks += [sec]
+    
     def extract(self, video):
         '''Obtains the closed-caption data embedded as VBI data within the
         filtered video clip and writes them to a SRT file.'''
@@ -590,6 +610,41 @@ class Subtitles:
         logging.info('*** Extracting subtitles ***')
         _cmd(['ccextractor', '-o', self.srt, '-utf8', '-ve',
               '--no_progress_bar', video], expected = 232)
+    
+    def adjust(self):
+        '''Joining video can cause the closed-caption VBI data to become
+        out-of-sync with the video, because some closed captions last longer
+        than the individual clips and ccextractor doesn't know when to clip
+        these captions. To compensate for this, any captions which
+        extend longer than the cutpoint are clipped, and the difference is
+        subtracted from the rest of the captions.'''
+        if len(self.marks) == 0:
+            return
+        delay = 0.0
+        curr = 0
+        newsubs = ''
+        ts = '(\d\d):(\d\d):(\d\d),(\d+)'
+        regex = re.compile(ts + '\s*-+>\s*' + ts)
+        with open(self.srt, 'r') as subs:
+            for line in subs:
+                match = re.search(regex, line)
+                if match:
+                    (start, end) = _convert_timestamp(match)
+                    start += delay
+                    end += delay
+                    if curr < len(self.marks) and self.marks[curr] < end:
+                        if self.marks[curr] > start:
+                            delay += self.marks[curr] - end
+                            end = self.marks[curr]
+                        curr += 1
+                    start = _seconds_to_time_frac(start, True)
+                    end = _seconds_to_time_frac(end, True)
+                    newsubs += '%s --> %s\n' % (start, end)
+                else:
+                    newsubs += line
+        _clean(self.srt)
+        with open(self.srt, 'w') as subs:
+            subs.write(newsubs)
     
     def clean_tmp(self):
         'Removes temporary SRT files.'
@@ -1064,6 +1119,7 @@ class Transcoder:
             args += self.source.split_args[1]
         _cmd(args)
         self.seg += 1
+        self.subtitles.mark(clip[1])
     
     def split(self):
         '''Uses the source's cutlist to mark specific video clips from the
@@ -1100,6 +1156,7 @@ class Transcoder:
             args += self.source.split_args[1]
         _cmd(args)
         self.subtitles.extract(self._join)
+        self.subtitles.adjust()
     
     def _find_streams(self):
         '''Locates the PID numbers of the video and audio streams to be encoded
