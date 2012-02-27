@@ -1,9 +1,9 @@
 This program uses a MythTV database or WTV recording to transcode
-recorded TV programs to MPEG-4 video using the H.264 and AAC codecs, cutting
-the video at certain commercial points selected by the user within MythTV's
-frontend or by Comskip. The resulting MPEG-4 file comes complete with SRT
-subtitles extracted from the embedded VBI closed-caption data. and
-iTunes-compatible metadata about the episode, if it can be found.
+recorded TV programs to MPEG-4 or Matroska video using the H.264/AAC
+or VP8/Vorbis/FLAC codecs, cutting the video at certain commercial points
+detected by either MythTV or by Comskip. The resulting video file comes
+complete with SRT subtitles extracted from the embedded VBI closed-caption
+data. and iTunes-compatible metadata about the episode, if it can be found.
 
 In short, this program calls a bunch of programs to convert a file like
 1041_20100523000000.mpg or Program Name_ABC_2010_05_23_00_00_00.wtv into a
@@ -16,19 +16,25 @@ different computer, or WTV source files from a remote SMB share / HomeGroup.
 
 Requirements:
 - FFmpeg (http://ffmpeg.org)
-  - must be compiled with --enable-libx264
-  - if using faac for audio encoding, must be compiled with --enable-libfaac
 - Java (http://www.java.com)
 - Project-X (http://project-x.sourceforge.net)
 - remuxTool.jar (http://babgvant.com/downloads/dburckh/remuxTool.jar)
-- MP4Box (http://gpac.sourceforge.net)
-- Python 2.6+ (http://www.python.org)
+- Python 2.7 (http://www.python.org)
   - lxml (http://lxml.de)
   - mysql-python (http://sourceforge.net/projects/mysql-python)
   - the MythTV Python bindings (if MythTV is not installed already)
 
-Optional dependencies:
+For MPEG-4 / H.264:
+- MP4Box (http://gpac.sourceforge.net)
 - neroAacEnc (http://www.nero.com/enu/technologies-aac-codec.html)
+- FFmpeg must be compiled with --enable-libx264
+- if using faac for audio, FFmpeg must be compiled with --enable-libfaac
+
+For Matroska / VP8:
+- MKVToolNix (http://www.bunkus.org/videotools/mkvtoolnix/)
+- FFmpeg must be compiled with --enable-libvpx and --enable-libvorbis
+
+Optional dependencies:
 - ccextractor (http://ccextractor.sourceforge.net)
 - AtomicParsley (https://bitbucket.org/wez/atomicparsley)
 
@@ -74,26 +80,30 @@ Special thanks to:
 - Project-X team
 
 Changelog:
+1.3 - support for Matroska / VP8, fixed subtitle sync problems
 1.2 - better accuracy for commercial clipping, easier configuration
 1.1 - support for multiple audio streams, Comskip
 1.0 - initial release
 
 TODO:
-- use a custom exception
-- check for adequate disk space on /tmp and destination partitions
+- better error handling
+- check for adequate disk space on temporary directory and destination
 - generate thumbnail if necessary
 - better genre interpretation for WTV files
 - fetch metadata for movies as well as TV episodes
 - allow users to manually enter in metadata if none can be found
 
 Long-term goals:
+- add entries to MythTV's database when encoding is finished
 - support for boxed-set TV seasons on DVD
-- .dvr-ms support
 - metadata / chapter support for as many different players as possible,
   especially Windows Media Player
-- optionally use Matroska / VP8 as a target format
 - easier installation: all required programs should be bundled
+- Python 3.x compatibility
+- apply video filters, such as deinterlace, crop detection, etc.
+- a separate program for viewing / editing Comskip data
 
 Known issues:
-- subtitles seem to be out-of-sync when played with MPlayer, works in vlc
 - subtitle font is sometimes too large on QuickTime / iTunes / iPods
+- many Matroska players seem to have trouble displaying metadata properly
+- video_br and video_crf aren't recognized options in ffmpeg 0.7+

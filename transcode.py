@@ -3,11 +3,11 @@
 
 '''
 This program uses a MythTV database or WTV recording to transcode
-recorded TV programs to MPEG-4 video using the H.264 and AAC codecs, cutting
-the video at certain commercial points selected by the user within MythTV's
-frontend or by Comskip. The resulting MPEG-4 file comes complete with SRT
-subtitles extracted from the embedded VBI closed-caption data. and
-iTunes-compatible metadata about the episode, if it can be found.
+recorded TV programs to MPEG-4 or Matroska video using the H.264/AAC
+or VP8/Vorbis/FLAC codecs, cutting the video at certain commercial points
+detected by either MythTV or by Comskip. The resulting video file comes
+complete with SRT subtitles extracted from the embedded VBI closed-caption
+data. and iTunes-compatible metadata about the episode, if it can be found.
 
 In short, this program calls a bunch of programs to convert a file like
 1041_20100523000000.mpg or Program Name_ABC_2010_05_23_00_00_00.wtv into a
@@ -20,19 +20,25 @@ different computer, or WTV source files from a remote SMB share / HomeGroup.
 
 Requirements:
 - FFmpeg (http://ffmpeg.org)
-  - must be compiled with --enable-libx264
-  - if using faac for audio encoding, must be compiled with --enable-libfaac
 - Java (http://www.java.com)
 - Project-X (http://project-x.sourceforge.net)
 - remuxTool.jar (http://babgvant.com/downloads/dburckh/remuxTool.jar)
-- MP4Box (http://gpac.sourceforge.net)
-- Python 2.6+ (http://www.python.org)
+- Python 2.7 (http://www.python.org)
   - lxml (http://lxml.de)
   - mysql-python (http://sourceforge.net/projects/mysql-python)
   - the MythTV Python bindings (if MythTV is not installed already)
 
-Optional dependencies:
+For MPEG-4 / H.264:
+- MP4Box (http://gpac.sourceforge.net)
 - neroAacEnc (http://www.nero.com/enu/technologies-aac-codec.html)
+- FFmpeg must be compiled with --enable-libx264
+- if using faac for audio, FFmpeg must be compiled with --enable-libfaac
+
+For Matroska / VP8:
+- MKVToolNix (http://www.bunkus.org/videotools/mkvtoolnix/)
+- FFmpeg must be compiled with --enable-libvpx and --enable-libvorbis
+
+Optional dependencies:
 - ccextractor (http://ccextractor.sourceforge.net)
 - AtomicParsley (https://bitbucket.org/wez/atomicparsley)
 
@@ -79,29 +85,33 @@ Special thanks to:
 '''
 
 # Changelog:
+# 1.3 - support for Matroska / VP8, fixed subtitle sync problems
 # 1.2 - better accuracy for commercial clipping, easier configuration
 # 1.1 - support for multiple audio streams, Comskip
 # 1.0 - initial release
 
 # TODO:
-# - use a custom exception
-# - check for adequate disk space on /tmp and destination partitions
+# - better error handling
+# - check for adequate disk space on temporary directory and destination
 # - generate thumbnail if necessary
 # - better genre interpretation for WTV files
 # - fetch metadata for movies as well as TV episodes
 # - allow users to manually enter in metadata if none can be found
 
 # Long-term goals:
+# - add entries to MythTV's database when encoding is finished
 # - support for boxed-set TV seasons on DVD
 # - metadata / chapter support for as many different players as possible,
 #   especially Windows Media Player
-# - optionally use Matroska / VP8 as a target format
 # - easier installation: all required programs should be bundled
+# - Python 3.x compatibility
+# - apply video filters, such as deinterlace, crop detection, etc.
+# - a separate program for viewing / editing Comskip data
 
 # Known issues:
-# - subtitles seem to lead the audio after several commercial cuts
 # - subtitle font is sometimes too large on QuickTime / iTunes / iPods
-# - many Matroska players seem to have trouble displaying metadata
+# - many Matroska players seem to have trouble displaying metadata properly
+# - video_br and video_crf aren't recognized options in ffmpeg 0.7+
 
 import re, os, sys, math, datetime, subprocess, urllib, tempfile, glob
 import shutil, codecs, StringIO, time, optparse, unicodedata, logging
@@ -332,16 +342,16 @@ def _get_defaults():
     'Returns configuration defaults for this program.'
     opts = {'final_path' : '/srv/video', 'tmp' : None, 'matroska' : False,
             'format' : '%T/%T - %S', 'replace_char' : '', 'language' : 'en',
-            'vp8' : False, 'two_pass' : False, 'preset' : None,
-            'video_br' : 1500, 'video_crf' : 22, 'resolution' : None,
-            'ipod' : False, 'webm' : False, 'ipod_resolution' : '480p',
-            'ipod_preset' : 'ipod640', 'webm_resolution' : '720p',
-            'webm_preset' : '720p', 'nero' : True, 'flac' : False,
-            'audio_br' : 128, 'audio_q' : 0.3, 'use_tvdb_rating' : True,
-            'use_tvdb_descriptions' : False, 'host' : '127.0.0.1',
-            'database' : 'mythconverg', 'user' : 'mythtv',
-            'password' : 'mythtv', 'pin' : 0, 'quiet' : False,
-            'verbose' : False, 'thresh' : 5,
+            'vp8' : False, 'two_pass' : False, 'h264_preset' : None,
+            'vp8_preset' : '720p', 'video_br' : 1500, 'video_crf' : 22,
+            'resolution' : None, 'ipod' : False, 'webm' : False,
+            'ipod_resolution' : '480p', 'ipod_preset' : 'ipod640',
+            'webm_resolution' : '720p', 'webm_preset' : '720p', 'nero' : True,
+            'flac' : False, 'audio_br' : 128, 'audio_q' : 0.3,
+            'use_tvdb_rating' : True, 'use_tvdb_descriptions' : False,
+            'host' : '127.0.0.1', 'database' : 'mythconverg',
+            'user' : 'mythtv', 'password' : 'mythtv', 'pin' : 0,
+            'quiet' : False, 'verbose' : False, 'thresh' : 5,
             'projectx' : 'project-x/ProjectX.jar',
             'remuxtool' : 'remuxTool.jar'}
     return opts
@@ -349,8 +359,9 @@ def _get_defaults():
 def _add_option(opts, key, val):
     'Inserts the given configuration setting into the dictionary.'
     key = key.lower()
-    if key in ['tmp', 'preset', 'resolution', 'ipod_preset',
-               'ipod_resolution', 'webm_preset', 'webm_resolution']:
+    if key in ['tmp', 'h264_preset', 'vp8_preset', 'resolution',
+               'ipod_preset', 'ipod_resolution', 'webm_preset',
+               'webm_resolution']:
         if val == '' or not val:
             val = None
     if key in ['matroska', 'vp8', 'two_pass', 'webm', 'ipod', 'nero', 'flac',
@@ -404,7 +415,7 @@ def _get_options():
     opts = _read_options()
     usage = 'usage: %prog [options] chanid time\n' + \
         '  %prog [options] wtv-file'
-    version = '%prog 1.1'
+    version = '%prog 1.3'
     parser = optparse.OptionParser(usage = usage, version = version,
                                    formatter = optparse.TitledHelpFormatter())
     flopts = optparse.OptionGroup(parser, 'File options')
@@ -476,9 +487,12 @@ def _get_options():
                       type = 'int', default = opts['video_crf'],
                       help = 'one-pass target compression ratio (~15-25 is ' +
                       'ideal) [default: %default]')
-    viopts.add_option('-p', '--preset', dest = 'preset', metavar = 'PRE',
-                      default = opts['preset'], help = 'ffmpeg x264 preset ' +
-                      'to use [default: %default]')
+    viopts.add_option('--h264-preset', dest = 'h264_preset', metavar = 'PRE',
+                      default = opts['h264_preset'], help = 'ffmpeg x264 ' +
+                      'preset to use [default: %default]')
+    viopts.add_option('--vp8-preset', dest = 'vp8_preset', metavar = 'PRE',
+                      default = opts['vp8_preset'], help = 'ffmpeg libvpx ' +
+                      'preset to use [default: %default]')
     viopts.add_option('-r', '--res', dest = 'resolution', metavar = 'RES',
                       default = opts['resolution'], help = 'target video ' +
                       'resolution or aspect ratio [default: %default]')
@@ -500,10 +514,10 @@ def _get_options():
                       '[default: %default]')
     parser.add_option_group(viopts)
     auopts = optparse.OptionGroup(parser, 'Audio encoding options')
-    auopts.add_option('-n', '--nero', dest = 'nero', action = 'store_true',
+    auopts.add_option('--nero', dest = 'nero', action = 'store_true',
                       default = opts['nero'], help = 'use NeroAacEnc (must ' +
                       'be installed)' + _def_str(opts['nero'], True))
-    auopts.add_option('-f', '--faac', dest = 'nero', action = 'store_false',
+    auopts.add_option('--faac', dest = 'nero', action = 'store_false',
                       help = 'use libfaac (must be linked into ffmpeg)' +
                       _def_str(opts['nero'], False))
     auopts.add_option('--vorbis', dest = 'flac', action = 'store_false',
@@ -606,12 +620,16 @@ def _check_args(args, parser, opts):
         opts.flac = False
         opts.resolution = opts.ipod_resolution
         opts.preset = opts.ipod_preset
-    if opts.webm:
+    elif opts.webm:
         opts.matroska = True
         opts.vp8 = True
         opts.flac = False
         opts.resolution = opts.webm_resolution
         opts.preset = opts.webm_preset
+    elif opts.vp8:
+        opts.preset = opts.vp8_preset
+    else:
+        opts.preset = opts.h264_preset
     loglvl = logging.INFO
     if opts.verbose:
         loglvl = logging.DEBUG
@@ -637,7 +655,7 @@ class Subtitles:
         '''Determines whether ccextractor is present, and if so,
         stores the version number for later.'''
         ver = _ver(['ccextractor'], '(CCExtractor [0-9]+\.[0-9]+),')
-        return ver is not None
+        return ver is not None and not self.source.opts.webm
     
     def mark(self, sec):
         'Marks a cutpoint in the video at a given point.'
@@ -715,6 +733,7 @@ class MP4Chapters:
     
     def __init__(self, source):
         self.source = source
+        self.enabled = not self.source.opts.webm
         self._chap = source.base + '.xml'
         doc = xml.dom.minidom.Document()
         doc.appendChild(doc.createComment('GPAC 3GPP Text Stream'))
@@ -744,6 +763,8 @@ class MP4Chapters:
     def write(self):
         '''Outputs the chapter data to XML format and invokes MP4Box to embed
         the chapter XML file into a MP4 file.'''
+        if not self.enabled:
+            return
         _clean(self._chap)
         data = self._doc.toprettyxml(encoding = 'UTF-8', indent = '  ')
         data = _filter_xml(data)
@@ -769,13 +790,14 @@ class MKVChapters:
     
     def __init__(self, source):
         self.source = source
+        self.enabled = not source.opts.webm
         self._chap = source.base + '.chap'
         self._data = ''
     
     def add(self, pos, seg):
         '''Adds a new chapter marker at pos (in seconds).
         If seg is provided, the marker will be labelled 'Scene seg+1'.'''
-        if seg is None:
+        if seg is None or not self.enabled:
             return
         time = _seconds_to_time_frac(pos)
         self._data += 'CHAPTER%02d=%s\n' % (seg, time)
@@ -784,6 +806,8 @@ class MKVChapters:
     def write(self):
         '''Writes the chapter file and returns command-line arguments to embed
         the chapter date into a MKV file.'''
+        if not self.enabled:
+            return []
         _clean(self._chap)
         logging.debug('Chapter data file:')
         logging.debug(self._data)
@@ -826,7 +850,7 @@ class MP4Metadata:
                 self._rating_ok = True
             if _ver(rdns, '.*(--rDNSatom)'):
                 self._credits_ok = True
-            return True
+            return not self.source.opts.webm
         else:
             return False
     
@@ -983,7 +1007,7 @@ class MKVMetadata:
     
     def __init__(self, source):
         self.source = source
-        self.enabled = True
+        self.enabled = not self.source.opts.webm
         self._tags = self.source.base + '-tags.xml'
         imp = xml.dom.minidom.getDOMImplementation()
         url = 'http://www.matroska.org/files/tags/matroskatags.dtd'
@@ -1499,6 +1523,8 @@ class MKVTranscoder(Transcoder):
             args += common + ['-A', '-D'] + subs
         args += self.chapters.write()
         args += self.metadata.write(_version(self.opts))
+        if self.opts.webm:
+            args += ['--webm']
         args += ['-o', self.source.mkv]
         _cmd(args)
     
@@ -1773,6 +1799,45 @@ class Source(dict):
         else:
             logging.info('  No credits')
     
+    def print_options(self):
+        'Outputs the user-selected options to the log.'
+        logging.info('*** Printing configuration ***')
+        (fmt, audio, video, ext) = '', '', '', ''
+        if self.opts.webm:
+            (fmt, ext) = 'WebM', 'webm'
+        elif self.opts.ipod:
+            (fmt, ext) = 'iPod Touch compatible MPEG-4', 'm4v'
+        elif self.opts.matroska:
+            (fmt, ext) = 'Matroska', 'mkv'
+        else:
+            (fmt, ext) = 'MPEG-4', 'mp4'
+        if self.opts.vp8:
+            video = 'On2 VP8'
+        else:
+            video = 'H.264 AVC'
+        if self.opts.flac:
+            audio = 'FLAC'
+        elif self.opts.vp8:
+            audio = 'Ogg Vorbis'
+        elif self.opts.nero:
+            audio = 'AAC (neroAacEnc)'
+        else:
+            audio = 'AAC (libfaac)'
+        logging.info('  Format: %s, %s, %s' % (fmt, video, audio))
+        enc = '  Video options:'
+        if self.opts.preset:
+            enc += ' preset \'%s\',' % self.opts.preset
+        if self.opts.resolution:
+            enc += ' resolution %dx%d,' % self.opts.resolution
+        if self.opts.two_pass:
+            enc += ' two-pass, br: %dk' % self.opts.video_br
+        else:
+            enc += ' one-pass, crf: %d' % self.opts.video_crf
+        logging.info(enc)
+        logging.info('  Source file: %s' % self.orig)
+        logging.info('  Target file: %s.%s' % (self.final, ext))
+        logging.info('  Temporary directory: %s' % self.opts.tmp)
+    
     def final_name(self):
         '''Obtains the filename of the target MPEG-4 file using the format
         string. Formatting is (mostly) compatible with Recorded.formatPath()
@@ -1810,7 +1875,6 @@ class Source(dict):
             path = path.replace('%%', '%')
             path = _sanitize(path, self.opts.replace_char)
             final = os.path.join(self.opts.final_path, *path.split('/'))
-        logging.debug('Final name: %s' % final)
         return final
     
     def make_final_dir(self):
@@ -1867,7 +1931,10 @@ class MythSource(Source):
         self._fetch_metadata()
         self.final = self.final_name()
         self.mp4 = '%s.%s' % (self.final, self.mp4ext)
-        self.mkv = self.final + '.mkv'
+        if self.opts.webm:
+            self.mkv = self.final + '.webm'
+        else:
+            self.mkv = self.final + '.mkv'
     
     def _frame_to_timecode(self, frame):
         '''Uses ffmpeg to remux a given number of frames in the video file
@@ -2087,6 +2154,7 @@ if __name__ == '__main__':
         s = MythSource(channel, timecode, opts)
     s.copy()
     s.print_metadata()
+    s.print_options()
     if opts.matroska:
         t = MKVTranscoder(s, opts)
     else:
