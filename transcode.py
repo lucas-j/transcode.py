@@ -285,11 +285,23 @@ def _x264_ver():
     support linked in.'''
     return _ver(['x264', '--version'], '(x264.*)$')
 
+def _vp8_ver():
+    '''Determines whether x264 is present, and if so, returns the
+    version string for later. Does not check whether ffmpeg has libx264
+    support linked in.'''
+    return _ver(['vp8enc'], '(VP8 Encoder .*)$')
+
 def _faac_ver():
-    '''Determines whether ffmpeg is present, and if so, returns the
+    '''Determines whether faac is present, and if so, returns the
     version string for later. Does not check whether ffmpeg has libfaac
     support linked in.'''
     return _ver(['faac', '--help'], '(FAAC.*)$')
+
+def _flac_ver():
+    '''Determines whether faac is present, and if so, returns the
+    version string for later. Does not check whether ffmpeg has libfaac
+    support linked in.'''
+    return _ver(['flac', '-version'], '(flac .*)$')
 
 def _projectx_ver(opts):
     '''Determines whether Project-X is present, and if so, returns the
@@ -302,13 +314,19 @@ def _version(opts):
     nero_ver = _nero_ver()
     faac_ver = _faac_ver()
     x264_ver = _x264_ver()
+    vp8_ver = _vp8_ver()
+    flac_ver = _flac_ver()
     ver = _ffmpeg_ver()
-    if x264_ver:
+    if opts.vp8 and vp8_ver:
+        ver += ', %s' % vp8_ver
+    elif not opts.vp8 and x264_ver:
         ver += ', %s' % x264_ver
     ver += ', %s' % _projectx_ver(opts)
     if opts.nero and nero_ver:
         ver += ', %s' % nero_ver
-    elif faac_ver:
+    elif opts.flac and flac_ver:
+        ver += ', %s' % flac_ver
+    elif not opts.vp8 and faac_ver:
         ver += ', %s' % faac_ver
     logging.debug('Version string: %s' % ver)
     return ver
@@ -1351,7 +1369,7 @@ class Transcoder:
         target = self.opts.resolution
         if target is not None:
             aspect = res[0] * 1.0 / res[1]
-            if aspect > target[0] / target[1]:
+            if aspect > target[0] * 1.0 / target[1]:
                 vres = int(round(target[0] / aspect))
                 if vres % 2 == 1:
                     vres += 1
@@ -1587,12 +1605,8 @@ class Source(dict):
         during splits or frame queries. Versions 0.7 and older use -newaudio /
         -newvideo tags for each additional stream present. Versions 0.8 and
         newer use -map 0:v -map 0:a to automatically copy over all streams.'''
-        match = re.search('[Ff]+mpeg\s+(.*)$', _ffmpeg_ver())
-        if not match:
-            raise RuntimeError('FFmpeg version could not be determined.')
-        ver = match.group(1)
-        match = re.match('^([0-9]+\.[0-9]+)', ver)
-        if match and float(match.group(1)) <= 0.7:
+        has_c = _ver(['ffmpeg', '-help'], '^(-c codec)')
+        if not has_c:
             args = [['-acodec', 'copy', '-vcodec', 'copy',
                      '-f', 'mpegts']]
             for astream in xrange(1, self.astreams):
