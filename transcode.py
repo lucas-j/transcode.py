@@ -350,7 +350,7 @@ def _find_conf_file():
     local_dotfile = os.path.expanduser('~/.transcode')
     if os.path.exists(local_dotfile):
         return local_dotfile
-    conf_file = os.path.split(os.path.realpath(__file__))[0]
+    conf_file = os.path.dirname(os.path.realpath(__file__))
     conf_file = os.path.join(conf_file, 'transcode.conf')
     if os.path.exists(conf_file):
         return conf_file
@@ -367,9 +367,10 @@ def _get_defaults():
             'webm_resolution' : '720p', 'webm_preset' : '720p', 'nero' : True,
             'flac' : False, 'audio_br' : 128, 'audio_q' : 0.3,
             'use_tvdb_rating' : True, 'use_tvdb_descriptions' : False,
-            'host' : '127.0.0.1', 'database' : 'mythconverg',
-            'user' : 'mythtv', 'password' : 'mythtv', 'pin' : 0,
-            'quiet' : False, 'verbose' : False, 'thresh' : 5,
+            'import_mythtv' : False, 'host' : '127.0.0.1',
+            'database' : 'mythconverg', 'user' : 'mythtv',
+            'password' : 'mythtv', 'pin' : 0, 'quiet' : False,
+            'verbose' : False, 'thresh' : 5,
             'projectx' : 'project-x/ProjectX.jar',
             'remuxtool' : 'remuxTool.jar'}
     return opts
@@ -383,7 +384,8 @@ def _add_option(opts, key, val):
         if val == '' or not val:
             val = None
     if key in ['matroska', 'vp8', 'two_pass', 'webm', 'ipod', 'nero', 'flac',
-               'use_tvdb_rating', 'use_tvdb_descriptions', 'quiet', 'verbose']:
+               'use_tvdb_rating', 'use_tvdb_descriptions', 'quiet', 'verbose',
+               'import_mythtv']:
         val = val.lower()
         if val in ['1', 't', 'y', 'true', 'yes', 'on']:
             val = True
@@ -584,6 +586,14 @@ def _get_options():
     myopts.add_option('--pin', dest = 'pin', metavar = 'PIN', type = 'int',
                       default = opts['pin'], help = 'MythTV security PIN ' +
                       '[default: %04d]' % opts['pin'])
+    myopts.add_option('--import', dest = 'import_mythtv',
+                      action = 'store_true', default = opts['import_mythtv'],
+                      help = 'import the transcoded video into MythTV' +
+                      _def_str(opts['import_mythtv'], True))
+    myopts.add_option('--no-import', dest = 'import_mythtv',
+                      action = 'store_false', help = 'don\'t import ' +
+                      'video into MythTV' +
+                      _def_str(opts['import_mythtv'], False))
     parser.add_option_group(myopts)
     miopts = optparse.OptionGroup(parser, 'Miscellaneous options')
     miopts.add_option('-q', '--quiet', dest = 'quiet', action = 'store_true',
@@ -1204,7 +1214,7 @@ class Transcoder:
         an MPEG-TS video clip from clip[0] to clip[1]. All values are
         in seconds.'''
         logging.info('*** Extracting segment %d: [%s - %s] ***' %
-                     (self.seg, _seconds_to_time(clip[0]),
+                     (self.seg + 1, _seconds_to_time(clip[0]),
                       _seconds_to_time(clip[1])))
         self.chapters.add(elapsed, self.seg)
         args = ['ffmpeg', '-y', '-i', self.source.orig, '-ss', str(clip[0]),
@@ -1346,7 +1356,7 @@ class Transcoder:
         one file, and then extract each media stream (video / audio) from the
         container into separate raw data files.'''
         logging.info('*** Demuxing video ***')
-        name = os.path.split(self._demux)[-1]
+        name = os.path.basename(self._demux)
         try:
             _cmd(['java', '-jar', self.opts.projectx, '-out', self.opts.tmp,
                   '-name', name, '-demux', self._join])
@@ -1570,6 +1580,7 @@ class Source(dict):
     mkv = None
     meta_present = False
     split_args = None
+    job = None
     
     def __repr__(self):
         season = int(self.get('season', 0))
@@ -1598,6 +1609,10 @@ class Source(dict):
             self.mp4ext = 'm4v'
         else:
             self.mp4ext = 'mp4'
+        if opts.webm:
+            self.mkvext = 'webm'
+        else:
+            self.mkvext = 'mkv'
         self.tvdb = MythTV.ttvdb.tvdb_api.Tvdb(language = self.opts.language)
     
     def _check_split_args(self):
@@ -1856,19 +1871,19 @@ class Source(dict):
         '''Obtains the filename of the target MPEG-4 file using the format
         string. Formatting is (mostly) compatible with Recorded.formatPath()
         from dataheap.py, and the format used in mythrename.pl.'''
-        final = os.path.join(self.opts.final_path,
-                             os.path.split(self.base)[-1])
+        final = os.path.join(self.opts.final_path, os.path.basename(self.base))
         if self.meta_present:
-            path = self.opts.format
+            path = re.sub('\\\\', '/', self.opts.format)
             tags = [('%T', 'title'), ('%S', 'subtitle'), ('%R', 'description'),
                     ('%C', 'category'), ('%n', 'syndicatedepisodenumber'),
                     ('%s', 'season'), ('%E', 'episode'), ('%r', 'rating')]
             for tag, key in tags:
                 if self.get(key) is not None:
                     val = unicode(self.get(key))
-                    val = val.replace('/', self.opts.replace_char)
-                    if os.name == 'nt':
-                        val = val.replace('\\', self.opts.replace_char)
+                    val = val.replace(os.path.sep, self.opts.replace_char)
+                    if os.path.altsep:
+                        val = val.replace(os.path.altsep,
+                                          self.opts.replace_char)
                     path = path.replace(tag, val)
                 else:
                     path = path.replace(tag, '')
@@ -1914,22 +1929,31 @@ class MythSource(Source):
     '''Obtains the raw MPEG-2 video data from a MythTV database along with
     metadata and a commercial-skip cutlist.'''
     prog = None
+    db = None
     
     class _Rating(MythTV.DBDataRef):
         'Query for the content rating within the MythTV database.'
         _table = 'recordedrating'
         _ref = ['chanid', 'starttime']
     
+    def __init__(self, jobid, opts):
+        self._get_db(opts)
+        try:
+            self.job = MythTV.Job(jobid, db = self.db)
+        except MythTV.exceptions.MythError:
+            raise ValueError('Could not find job ID %d.' % jobid)
+        channel = int(self.job.chanid)
+        time = long(self.job.starttime.strftime('%Y%m%d%H%M%S'))
+        self.__init__(channel, time, opts)
+    
     def __init__(self, channel, time, opts):
         Source.__init__(self, opts)
+        self.chanid = channel
         self.channel = channel
         self.time = _convert_time(time)
         self.base = os.path.join(opts.tmp, '%s_%s' % (str(channel), str(time)))
         self.orig = self.base + '-orig.mpg'
-        self.db_info = {'DBHostName' : opts.host, 'DBName' : opts.database,
-                        'DBUserName' : opts.user, 'DBPassword' : opts.password,
-                        'SecurityPin' : opts.pin}
-        self.db = MythTV.MythDB(**self.db_info)
+        self._get_db(opts)
         try:
             self.rec = MythTV.Recorded((channel, time), db = self.db)
         except MythTV.exceptions.MythError:
@@ -1945,10 +1969,14 @@ class MythSource(Source):
         self._fetch_metadata()
         self.final = self.final_name()
         self.mp4 = '%s.%s' % (self.final, self.mp4ext)
-        if self.opts.webm:
-            self.mkv = self.final + '.webm'
-        else:
-            self.mkv = self.final + '.mkv'
+        self.mkv = '%s.%s' % (self.final, self.mkvext)
+    
+    def _get_db(self, opts):
+        'Connects to the MythTV MySQL database.'
+        self.db_info = {'DBHostName' : opts.host, 'DBName' : opts.database,
+                        'DBUserName' : opts.user, 'DBPassword' : opts.password,
+                        'SecurityPin' : opts.pin}
+        self.db = MythTV.MythDB(**self.db_info)
     
     def _frame_to_timecode(self, frame):
         '''Uses ffmpeg to remux a given number of frames in the video file
@@ -2015,21 +2043,65 @@ class MythSource(Source):
         specified path, if enough space is available.'''
         bs = 4096 * 1024
         logging.info('*** Copying video to %s ***' % self.orig)
-        source = self.rec.open()
-        try:
+        with self.rec.open() as source:
             with open(self.orig, 'wb') as dest:
-                data = source.read(bs);
+                data = source.read(bs)
                 while len(data) > 0:
                     dest.write(data)
                     data = source.read(bs)
-        finally:
-            source.close()
         (self.fps, self.resolution, self.duration,
          self.vstreams, self.astreams) = self.video_params()
         if not self.fps or not self.resolution or not self.duration:
             raise RuntimeError('Could not determine video parameters.')
         self.opts.resolution = self.parse_resolution(self.opts.resolution)
         self._cut_list()
+    
+    def _clean_cutlist(self):
+        '''Removes commercial-skip and cut marks from the cutlist.
+        Adapted from http://www.mythtv.org/wiki/Transcode_wrapper_stub'''
+        markup = []
+        comm_start = self.rec.markup.MARK_COMM_START
+        comm_end = self.rec.markup.MARK_COMM_END
+        cut_start = self.rec.markup.MARK_CUT_START
+        cut_end = self.rec.markup.MARK_CUT_END
+        for (index, mark) in reversed(list(enumerate(self.rec.markup))):
+            if mark.type in (comm_start, comm_end, cut_start, cut_end):
+                del self.rec.markup[index]
+        self.rec.markup.commit()
+        self.rec.bookmark = 0
+        self.rec.cutlist = 0
+    
+    def _rebuild_seek(self):
+        'Queues a MythTV job to rebuild the seek table for the recording.'
+        self.rec.seek.clean()
+        data = {'chanid' : self.chanid, 'starttime' : self.time,
+                'type' : MythTV.Job.COMMFLAG, 'args' : '--rebuild'}
+        job = MythTV.Job(db = self.db).create(data = data)
+    
+    def import_mythtv(self):
+        '''Imports the transcoded video into MythTV, overwriting the original
+        MPEG-2 recording, and adjusting the Recorded table to match.'''
+        bs = 4096 * 1024
+        logging.info('*** Importing video into MythTV ***')
+        video = ''
+        if self.opts.matroska:
+            video = self.mkv
+        else:
+            video = self.mp4
+        self.rec.basename = os.path.basename(video)
+        with open(video, 'r') as source:
+            with self.rec.open('w') as dest:
+                data = source.read(bs)
+                while len(data) > 0:
+                    dest.write(data)
+                    data = source.read(bs)
+        self._clean_cutlist()
+        if self.opts.use_tvdb_rating and self.get('popularity') is not None:
+            self.rec.stars = round(self.get('popularity') / 51.0 * 2) / 10.0
+        self.rec.filesize = long(os.path.getsize(video))
+        self.rec.transcoded = 1
+        self.rec.update()
+        self._rebuild_seek()
 
 class WTVSource(Source):
     '''Obtains the raw MPEG-2 video data from a Windows TV recording (.WTV)
@@ -2052,13 +2124,13 @@ class WTVSource(Source):
             b = self.channel + '_' + t
             self.base = os.path.join(opts.tmp, '%s_%s' % (self.channel, t))
         else:
-            f = os.path.split(wtv)[-1]
+            f = os.path.basename(wtv)
             self.base = os.path.join(opts.tmp, os.path.splitext(f)[0])
         self.orig = self.base + '-orig.ts'
         self._fetch_metadata()
         self.final = self.final_name()
         self.mp4 = '%s.%s' % (self.final, self.mp4ext)
-        self.mkv = self.final + '.mkv'
+        self.mkv = '%s.%s' % (self.final, self.mkvext)
     
     def _cut_list(self):
         '''Obtains a commercial-skip cutlist from previously generated
@@ -2160,8 +2232,12 @@ if __name__ == '__main__':
     _check_args(args, parser, opts)
     s = None
     if len(args) == 1:
-        wtv = args[0]
-        s = WTVSource(wtv, opts)
+        if args[0].isdigit():
+            jobid = int(args[0])
+            s = MythSource(jobid, opts)
+        else:
+            wtv = args[0]
+            s = WTVSource(wtv, opts)
     else:
         channel = int(args[0])
         timecode = long(args[1])
@@ -2184,6 +2260,8 @@ if __name__ == '__main__':
     t.remux()
     t.clean_tmp()
     s.clean_tmp()
+    if type(s) == MythSource and opts.import_mythtv:
+        s.import_mythtv()
 
 # Copyright (c) 2012, Lucas Jacobs
 # All rights reserved.
