@@ -11,7 +11,7 @@ data. and iTunes-compatible metadata about the episode, if it can be found.
 
 In short, this program calls a bunch of programs to convert a file like
 1041_20100523000000.mpg or Program Name_ABC_2010_05_23_00_00_00.wtv into a
-file like /srv/video/Program Name/Program Name - Episode Name.mp4,
+file like ~/Videos/Program Name/Program Name - Episode Name.mp4,
 including captions, file tags, chapters, and with commercials removed.
 
 This program has been tested on Windows, Linux and FreeBSD, and can optionally
@@ -82,6 +82,12 @@ Special thanks to:
 - wagnerrp, the maintainer of the Python MythTV bindings
 - Project-X team
 '''
+
+# todo -
+# 1) simplify encode option parsing
+# 2) symlink / MythVideo integration
+# 3) MythLog / error handling
+# 4) better job handling
 
 # Changelog:
 # 1.3 - support for Matroska / VP8, fixed subtitle sync problems
@@ -286,11 +292,23 @@ def _x264_ver():
     support linked in.'''
     return _ver(['x264', '--version'], '(x264.*)$')
 
+def _vp8_ver():
+    '''Determines whether x264 is present, and if so, returns the
+    version string for later. Does not check whether ffmpeg has libx264
+    support linked in.'''
+    return _ver(['vp8enc'], '(VP8 Encoder .*)$')
+
 def _faac_ver():
-    '''Determines whether ffmpeg is present, and if so, returns the
+    '''Determines whether faac is present, and if so, returns the
     version string for later. Does not check whether ffmpeg has libfaac
     support linked in.'''
     return _ver(['faac', '--help'], '(FAAC.*)$')
+
+def _flac_ver():
+    '''Determines whether faac is present, and if so, returns the
+    version string for later. Does not check whether ffmpeg has libfaac
+    support linked in.'''
+    return _ver(['flac', '-version'], '(flac .*)$')
 
 def _projectx_ver(opts):
     '''Determines whether Project-X is present, and if so, returns the
@@ -303,13 +321,19 @@ def _version(opts):
     nero_ver = _nero_ver()
     faac_ver = _faac_ver()
     x264_ver = _x264_ver()
+    vp8_ver = _vp8_ver()
+    flac_ver = _flac_ver()
     ver = _ffmpeg_ver()
-    if x264_ver:
+    if opts.video == 'vp8' and vp8_ver:
+        ver += ', %s' % vp8_ver
+    elif opts.video == 'h264' and x264_ver:
         ver += ', %s' % x264_ver
     ver += ', %s' % _projectx_ver(opts)
-    if opts.nero and nero_ver:
+    if opts.aac_encoder == 'nero' and nero_ver:
         ver += ', %s' % nero_ver
-    elif faac_ver:
+    elif opts.audio == 'flac' and flac_ver:
+        ver += ', %s' % flac_ver
+    elif opts.aac_encoder == 'faac' and faac_ver:
         ver += ', %s' % faac_ver
     logging.debug('Version string: %s' % ver)
     return ver
@@ -333,7 +357,10 @@ def _find_conf_file():
     local_dotfile = os.path.expanduser('~/.transcode')
     if os.path.exists(local_dotfile):
         return local_dotfile
-    conf_file = os.path.split(os.path.realpath(__file__))[0]
+    for conf_file in ['/usr/local/etc/transcode.conf', '/etc/transcode.conf']:
+        if os.path.exists(conf_file):
+            return conf_file
+    conf_file = os.path.dirname(os.path.realpath(__file__))
     conf_file = os.path.join(conf_file, 'transcode.conf')
     if os.path.exists(conf_file):
         return conf_file
@@ -341,52 +368,76 @@ def _find_conf_file():
 
 def _get_defaults():
     'Returns configuration defaults for this program.'
-    opts = {'final_path' : '/srv/video', 'tmp' : None, 'matroska' : False,
-            'format' : '%T/%T - %S', 'replace_char' : '', 'language' : 'en',
-            'vp8' : False, 'two_pass' : False, 'h264_preset' : None,
-            'vp8_preset' : '720p', 'video_br' : 1500, 'video_crf' : 22,
-            'resolution' : None, 'ipod' : False, 'webm' : False,
-            'ipod_resolution' : '480p', 'ipod_preset' : 'ipod640',
-            'webm_resolution' : '720p', 'webm_preset' : '720p', 'nero' : True,
-            'flac' : False, 'audio_br' : 128, 'audio_q' : 0.3,
-            'use_tvdb_rating' : True, 'use_tvdb_descriptions' : False,
-            'host' : '127.0.0.1', 'database' : 'mythconverg',
-            'user' : 'mythtv', 'password' : 'mythtv', 'pin' : 0,
-            'quiet' : False, 'verbose' : False, 'thresh' : 5,
+    opts = {'final_path' : '~/Videos', 'tmp' : None, 'format' : '%T/%T - %S',
+            'replace_char' : '', 'language' : 'en', 'host' : '127.0.0.1',
+            'database' : 'mythconverg', 'user' : 'mythtv',
+            'password' : 'mythtv', 'pin' : 0, 'import_mythtv' : False,
+            'container' : 'mp4', 'video' : None, 'audio' : None,
+            'ipod' : False, 'webm' : False, 'two_pass' : False,
+            'h264_rc' : None, 'vp8_rc' : 'vbr', 'video_br' : 1920,
+            'video_crf' : 23, 'preset' : None, 'h264_speed' : 'slow',
+            'vp8_speed' : '0', 'threads' : 0, 'resolution' : None,
+            'aac_encoder' : 'nero', 'audio_q' : 0.55, 'audio_br' : 192,
+            'downmix_to_stereo' : False, 'use_tvdb_rating' : True,
+            'use_tvdb_descriptions' : False, 'quiet' : False,
+            'verbose' : False, 'clip_thresh' : 5,
             'projectx' : 'project-x/ProjectX.jar',
-            'remuxtool' : 'remuxTool.jar'}
+            'remuxtool' : 'remuxTool.jar' }
+    opts['.mp4'] = {'video' : 'h264', 'audio' : 'aac'}
+    opts['.mkv'] = {'video' : 'vp8', 'audio' : 'vorbis'}
+    opts['.one_pass'] = {'h264_rc' : 'crf'}
+    opts['.two_pass'] = {'h264_rc' : 'cbr'}
+    opts['.ipod'] = {'container' : 'mp4', 'video' : 'h264', 'audio' : 'aac',
+                     'preset' : 'ipod640', 'resolution' : '480p'}
+    opts['.webm'] = {'container' : 'mkv', 'video' : 'vp8', 'audio' : 'vorbis'}
+    opts['.h264'] = {}
+    opts['.vp8'] = {}
+    opts['.aac'] = {}
+    opts['.vorbis'] = {}
+    opts['.flac'] = {}
+    opts['.faac'] = {}
+    opts['.nero'] = {}
+    opts['.ffmpeg-aac'] = {}
     return opts
 
 def _add_option(opts, key, val):
     'Inserts the given configuration setting into the dictionary.'
+    dct = opts
+    origkey = key
     key = key.lower()
-    if key in ['tmp', 'h264_preset', 'vp8_preset', 'resolution',
-               'ipod_preset', 'ipod_resolution', 'webm_preset',
-               'webm_resolution']:
+    match = re.search('(\w+)\.(\w+)', key)
+    if match:
+        dct = opts['.%s' % match.group(2)]
+        key = match.group(1)
+    if key in ['tmp', 'video', 'audio', 'h264_rc', 'vp8_rc', 'preset',
+               'h264_speed', 'vp8_speed', 'resolution']:
         if val == '' or not val:
             val = None
-    if key in ['matroska', 'vp8', 'two_pass', 'webm', 'ipod', 'nero', 'flac',
-               'use_tvdb_rating', 'use_tvdb_descriptions', 'quiet', 'verbose']:
+    if key in ['import_mythtv', 'ipod', 'webm', 'two_pass',
+               'downmix_to_stereo', 'use_tvdb_rating',
+               'use_tvdb_descriptions', 'quiet', 'verbose']:
         val = val.lower()
         if val in ['1', 't', 'y', 'true', 'yes', 'on']:
             val = True
         elif val in ['0', 'f', 'n', 'false', 'no', 'off']:
             val = False
         else:
-            raise ValueError('Invalid boolean value for %s: %s' % (key, val))
-    if key in ['video_br', 'video_crf', 'audio_br', 'audio_q',
-               'pin', 'thresh', 'audio_q']:
+            raise ValueError('Invalid boolean value for %s: %s' %
+                             (origkey, val))
+    if key in ['pin', 'video_br', 'video_crf', 'threads',
+               'audio_br', 'audio_q', 'clip_thresh']:
         try:
             if key == 'audio_q':
                 val = float(val)
             else:
                 val = int(val)
         except ValueError:
-            raise ValueError('Invalid numerical value for %s: %s' % (key, val))
+            raise ValueError('Invalid numerical value for %s: %s' %
+                             (origkey, val))
     if key in ['projectx', 'remuxtool']:
-        if not os.path.exists(val):
+        if not os.path.exists(os.path.expanduser(val)):
             raise IOError('File not found: %s' % val)
-    opts[key] = val
+    dct[key] = val
 
 def _read_options():
     'Reads configuration settings from a file.'
@@ -411,9 +462,8 @@ def _def_str(test, val):
     else:
         return ''
 
-def _get_options():
+def _get_options(opts):
     'Uses optparse to obtain command-line options.'
-    opts = _read_options()
     usage = 'usage: %prog [options] chanid time\n' + \
         '  %prog [options] wtv-file'
     version = '%prog 1.3'
@@ -445,20 +495,44 @@ def _get_options():
                       default = opts['language'], metavar = 'LANG',
                       help = 'two-letter language code [default: %default]')
     parser.add_option_group(flopts)
+    myopts = optparse.OptionGroup(parser, 'MythTV options')
+    myopts.add_option('--host', dest = 'host', metavar = 'IP',
+                      default = opts['host'], help = 'MythTV database ' +
+                      'host [default: %default]')
+    myopts.add_option('--database', dest = 'database', metavar = 'DB',
+                      default = opts['database'], help = 'MySQL database ' +
+                      'for MythTV [default: %default]')
+    myopts.add_option('--user', dest = 'user', metavar = 'USER',
+                      default = opts['user'], help = 'MySQL username for ' +
+                      'MythTV [default: %default]')
+    myopts.add_option('--password', dest = 'password', metavar = 'PWD',
+                      default = opts['password'], help = 'MySQL password ' +
+                      'for MythTV [default: %default]')
+    myopts.add_option('--pin', dest = 'pin', metavar = 'PIN', type = 'int',
+                      default = opts['pin'], help = 'MythTV security PIN ' +
+                      '[default: %04d]' % opts['pin'])
+    myopts.add_option('--import', dest = 'import_mythtv',
+                      action = 'store_true', default = opts['import_mythtv'],
+                      help = 'import the transcoded video into MythTV' +
+                      _def_str(opts['import_mythtv'], True))
+    myopts.add_option('--no-import', dest = 'import_mythtv',
+                      action = 'store_false', help = 'don\'t import ' +
+                      'video into MythTV' +
+                      _def_str(opts['import_mythtv'], False))
+    parser.add_option_group(myopts)
     vfopts = optparse.OptionGroup(parser, 'Video format options')
-    vfopts.add_option('--mp4', dest = 'matroska', action = 'store_false',
-                      help = 'use the MPEG-4 (MP4 / M4V) container format' +
-                      _def_str(opts['matroska'], False))
-    vfopts.add_option('--mkv', dest = 'matroska', action = 'store_true',
-                      default = opts['matroska'], help = 'use the Matroska ' +
-                      '(MKV) container format' +
-                      _def_str(opts['matroska'], True))
-    vfopts.add_option('--h264', dest = 'vp8', action = 'store_false',
-                      default = opts['vp8'], help = 'use H.264/MPEG-4 AVC ' +
-                      'and AAC' + _def_str(opts['vp8'], False))
-    vfopts.add_option('--vp8', dest = 'vp8', action = 'store_true',
-                      default = opts['vp8'], help = 'use On2\'s VP8 codec ' +
-                      'and Ogg Vorbis' + _def_str(opts['vp8'], True))
+    vfopts.add_option('--container', dest = 'container', metavar = 'FMT',
+                      default = opts['container'], choices = ['mp4', 'mkv'],
+                      help = 'the media container file type to use ' +
+                      '[default: %default]')
+    vfopts.add_option('--video', dest = 'video', metavar = 'CODEC',
+                      default = opts['video'], choices = ['h264', 'vp8'],
+                      help = 'the codec to use for encoding video ' +
+                      '[default: %default]')
+    vfopts.add_option('--audio', dest = 'audio', metavar = 'CODEC',
+                      default = opts['audio'],
+                      choices = ['aac', 'vorbis', 'flac'], help = 'the ' +
+                      'codec to use for encoding audio [default: %default]')
     vfopts.add_option('--ipod', dest = 'ipod', action = 'store_true',
                       default = opts['ipod'], help = 'use iPod Touch ' +
                       'compatibility settings' + _def_str(opts['ipod'], True))
@@ -480,60 +554,59 @@ def _get_options():
     viopts.add_option('-2', '--two-pass', dest = 'two_pass',
                       action = 'store_true', help = 'two-pass encoding' +
                       _def_str(opts['two_pass'], True))
+    viopts.add_option('--h264-rc', dest = 'h264_rc', metavar = 'RC',
+                      default = opts['h264_rc'], choices = ['crf', 'cbr'],
+                      help = 'x264 ratecontrol method to use ' +
+                      '[default: %default]')
+    viopts.add_option('--vp8-rc', dest = 'vp8_rc', metavar = 'RC',
+                      default = opts['vp8_rc'], choices = ['vbr', 'cbr'],
+                      help = 'libvpx ratecontrol method to use ' +
+                      '[default: %default]')
     viopts.add_option('--video-br', dest = 'video_br', metavar = 'BR',
                       type = 'int', default = opts['video_br'],
-                      help = 'two-pass target video bitrate (in KB/s) ' +
+                      help = 'target video bitrate (in KB/s) ' +
                       '[default: %default]')
     viopts.add_option('--video-crf', dest = 'video_crf', metavar = 'CR',
                       type = 'int', default = opts['video_crf'],
-                      help = 'one-pass target compression ratio (~15-25 is ' +
-                      'ideal) [default: %default]')
-    viopts.add_option('--h264-preset', dest = 'h264_preset', metavar = 'PRE',
-                      default = opts['h264_preset'], help = 'ffmpeg x264 ' +
-                      'preset to use [default: %default]')
-    viopts.add_option('--vp8-preset', dest = 'vp8_preset', metavar = 'PRE',
-                      default = opts['vp8_preset'], help = 'ffmpeg libvpx ' +
-                      'preset to use [default: %default]')
-    viopts.add_option('-r', '--res', dest = 'resolution', metavar = 'RES',
-                      default = opts['resolution'], help = 'target video ' +
-                      'resolution or aspect ratio [default: %default]')
-    viopts.add_option('--ipod-preset', dest = 'ipod_preset', metavar = 'PRE',
-                      default = opts['ipod_preset'], help = 'ffmpeg x264 ' +
-                      'preset to use for iPod Touch compatibility ' +
-                      '[default: %default]')
-    viopts.add_option('--ipod-res', dest = 'ipod_resolution', metavar = 'RES',
-                      default = opts['ipod_resolution'], help = 'target ' +
-                      'video resolution for iPod Touch compatibility ' +
-                      '[default: %default]')
-    viopts.add_option('--webm-preset', dest = 'webm_preset', metavar = 'PRE',
-                      default = opts['webm_preset'], help = 'ffmpeg libvpx ' +
-                      'preset to use for WebM video ' +
-                      '[default: %default]')
-    viopts.add_option('--webm-res', dest = 'webm_resolution', metavar = 'RES',
-                      default = opts['webm_resolution'], help = 'target ' +
-                      'video resolution for WebM video ' +
+                      help = 'target H.264 video quality ratio (15 to 25 ' +
+                      'is ideal) [default: %default]')
+    viopts.add_option('--preset', dest = 'preset', metavar = 'PRE',
+                      default = opts['preset'], help = 'ffmpeg preset ' +
+                      'file to use [default: %default]')
+    viopts.add_option('--h264-speed', dest = 'h264_speed', metavar = 'SP',
+                      choices = ['slow', 'medium', 'fast', 'faster'],
+                      default = opts['h264_speed'], help = 'x264 encoding ' +
+                      'speed [default: %default]')
+    viopts.add_option('--vp8-speed', dest = 'vp8_speed', metavar = 'SP',
+                      choices = [str(x) for x in xrange(0, 7)],
+                      default = opts['vp8_speed'], help = 'libvpx encoding ' +
+                      'speed [default: %default]')
+    viopts.add_option('--threads', dest = 'threads', metavar = 'TH',
+                      type = 'int', default = opts['threads'],
+                      help = 'amount of concurrent threads of execution ' +
+                      'to use when transcoding video [default: %default]')
+    viopts.add_option('-r', '--resolution', dest = 'resolution',
+                      metavar = 'RES', default = opts['resolution'],
+                      help = 'target video resolution or aspect ratio ' +
                       '[default: %default]')
     parser.add_option_group(viopts)
     auopts = optparse.OptionGroup(parser, 'Audio encoding options')
-    auopts.add_option('--nero', dest = 'nero', action = 'store_true',
-                      default = opts['nero'], help = 'use NeroAacEnc (must ' +
-                      'be installed)' + _def_str(opts['nero'], True))
-    auopts.add_option('--faac', dest = 'nero', action = 'store_false',
-                      help = 'use libfaac (must be linked into ffmpeg)' +
-                      _def_str(opts['nero'], False))
-    auopts.add_option('--vorbis', dest = 'flac', action = 'store_false',
-                      default = opts['flac'], help = 'use Ogg Vorbis audio ' +
-                      '(MKV only)' + _def_str(opts['flac'], False))
-    auopts.add_option('--flac', dest = 'flac', action = 'store_true',
-                      help = 'use FLAC audio (MKV only)' +
-                      _def_str(opts['flac'], True))
-    auopts.add_option('--audio-br', dest = 'audio_br', metavar = 'BR',
-                      type = 'int', default = opts['audio_br'], help =
-                      'faac / vorbis audio bitrate (in KB/s) ' +
-                      '[default: %default]')
+    auopts.add_option('--aac-encoder', dest = 'aac_encoder', metavar = 'ENC',
+                      choices = ['faac', 'nero', 'ffmpeg-aac'],
+                      default = opts['aac_encoder'], help = 'the encoder to ' +
+                      'use for AAC audio [default: %default]')
     auopts.add_option('--audio-q', dest = 'audio_q', metavar = 'Q',
                       type = 'float', default = opts['audio_q'], help =
                       'neroAacEnc audio quality ratio [default: %default]')
+    auopts.add_option('--audio-br', dest = 'audio_br', metavar = 'BR',
+                      type = 'int', default = opts['audio_br'], help =
+                      'libfaac, ffmpeg-aac or vorbis audio bitrate ' +
+                      '(in KB/s) [default: %default]')
+    auopts.add_option('--stereo', dest = 'downmix_to_stereo',
+                      action = 'store_true',
+                      default = opts['downmix_to_stereo'],
+                      help = 'downmix 5.1 surround sound to two channels' +
+                      _def_str(opts['downmix_to_stereo'], True))
     parser.add_option_group(auopts)
     mdopts = optparse.OptionGroup(parser, 'Metadata options')
     mdopts.add_option('--rating', dest = 'use_tvdb_rating',
@@ -551,23 +624,6 @@ def _get_options():
                       'episode descriptions from Tvdb when available' +
                       _def_str(opts['use_tvdb_descriptions'], True))
     parser.add_option_group(mdopts)
-    myopts = optparse.OptionGroup(parser, 'MythTV options')
-    myopts.add_option('--host', dest = 'host', metavar = 'IP',
-                      default = opts['host'], help = 'MythTV database ' +
-                      'host [default: %default]')
-    myopts.add_option('--database', dest = 'database', metavar = 'DB',
-                      default = opts['database'], help = 'MySQL database ' +
-                      'for MythTV [default: %default]')
-    myopts.add_option('--user', dest = 'user', metavar = 'USER',
-                      default = opts['user'], help = 'MySQL username for ' +
-                      'MythTV [default: %default]')
-    myopts.add_option('--password', dest = 'password', metavar = 'PWD',
-                      default = opts['password'], help = 'MySQL password ' +
-                      'for MythTV [default: %default]')
-    myopts.add_option('--pin', dest = 'pin', metavar = 'PIN', type = 'int',
-                      default = opts['pin'], help = 'MythTV security PIN ' +
-                      '[default: %04d]' % opts['pin'])
-    parser.add_option_group(myopts)
     miopts = optparse.OptionGroup(parser, 'Miscellaneous options')
     miopts.add_option('-q', '--quiet', dest = 'quiet', action = 'store_true',
                       default = opts['quiet'], help = 'avoid printing to ' +
@@ -576,10 +632,10 @@ def _get_options():
                       action = 'store_true', default = opts['verbose'],
                       help = 'print command output to stdout' +
                       _def_str(opts['verbose'], True))
-    miopts.add_option('--thresh', dest = 'thresh', metavar = 'TH',
-                      type = 'int', default = opts['thresh'], help = 'ignore ' +
-                      'clip segments TH seconds from the beginning or end ' +
-                      '[default: %default]')
+    miopts.add_option('--thresh', dest = 'clip_thresh', metavar = 'TH',
+                      type = 'int', default = opts['clip_thresh'],
+                      help = 'ignore clip segments TH seconds from the ' +
+                      'beginning or end [default: %default]')
     miopts.add_option('--project-x', dest = 'projectx', metavar = 'PATH',
                       default = opts['projectx'], help = 'path to the ' +
                       'Project-X JAR file                            ' +
@@ -591,6 +647,23 @@ def _get_options():
     parser.add_option_group(miopts)
     return parser
 
+def _collapse_args(defaults, opts):
+    '''Applies the options in a subgroup to global options if the condition
+    for that subgroup is met.'''
+    groups = [('mp4', 'container'), ('mkv', 'container'),
+              ('h264', 'video'), ('vp8', 'video'), ('aac', 'audio'),
+              ('vorbis', 'audio'), ('flac', 'audio'), ('ipod', 'ipod'),
+              ('webm', 'webm'), ('one_pass', 'two_pass'),
+              ('two_pass', 'two_pass'), ('faac', 'aac_encoder'),
+              ('nero', 'aac_encoder'), ('ffmpeg-aac', 'aac_encoder')]
+    for group, condition in groups:
+        cond = getattr(opts, condition)
+        if group == 'one_pass':
+            cond = not cond
+        if cond is True or cond == group:
+            for key, val in defaults['.%s' % group].iteritems():
+                setattr(opts, key, val)
+
 def _check_args(args, parser, opts):
     '''Checks to ensure the positional arguments are valid, and adjusts
     conflicting options if necessary.'''
@@ -600,7 +673,8 @@ def _check_args(args, parser, opts):
         except ValueError:
             print 'Error: invalid timestamp.'
             exit(1)
-    elif len(args) == 1:
+    elif len(args) == 1 and not args[0].isdigit():
+        args[0] = os.path.expanduser(args[0])
         if not os.path.exists(args[0]):
             print 'Error: file not found.'
             exit(1)
@@ -610,27 +684,14 @@ def _check_args(args, parser, opts):
     else:
         parser.print_help()
         exit(1)
+    if opts.final_path in [None, '', '.', './', '.\\']:
+        opts.final_path = os.path.dirname(os.path.realpath(__file__))
+    for key in ['final_path', 'tmp', 'projectx', 'remuxtool']:
+        if getattr(opts, key) is not None:
+            setattr(opts, key, os.path.expanduser(getattr(opts, key)))
     if opts.ipod and opts.webm:
         print 'Error: WebM and iPod options conflict.'
         exit(1)
-    if (opts.vp8 or opts.flac or opts.webm) and not opts.matroska:
-        opts.matroska = True
-    if opts.ipod:
-        opts.matroska = False
-        opts.vp8 = False
-        opts.flac = False
-        opts.resolution = opts.ipod_resolution
-        opts.preset = opts.ipod_preset
-    elif opts.webm:
-        opts.matroska = True
-        opts.vp8 = True
-        opts.flac = False
-        opts.resolution = opts.webm_resolution
-        opts.preset = opts.webm_preset
-    elif opts.vp8:
-        opts.preset = opts.vp8_preset
-    else:
-        opts.preset = opts.h264_preset
     loglvl = logging.INFO
     if opts.verbose:
         loglvl = logging.DEBUG
@@ -719,7 +780,7 @@ class MP4Subtitles(Subtitles):
             return
         arg = '%s:name=Subtitles:layout=0x125x0x-1' % self.srt
         _cmd(['MP4Box', '-tmp', self.source.opts.final_path, '-add',
-              arg, self.source.mp4])
+              arg, self.source.final_file])
 
 class MKVSubtitles(Subtitles):
     'Embeds SRT subtitles into the final MPEG-4 video file.'
@@ -774,7 +835,7 @@ class MP4Chapters:
         with open(self._chap, 'w') as dest:
             dest.write(data)
         args = ['MP4Box', '-tmp', self.source.opts.final_path,
-                '-add', '%s:chap' % self._chap, self.source.mp4]
+                '-add', '%s:chap' % self._chap, self.source.final_file]
         try:
             _cmd(args)
         except RuntimeError:
@@ -923,11 +984,11 @@ class MP4Metadata:
         the program is successful and outputs a new MP4 file with the newly
         embedded metadata, copies the new file over the old.'''
         self.clean_tmp()
-        args = ['AtomicParsley', self.source.mp4] + args
+        args = ['AtomicParsley', self.source.final_file] + args
         _cmd(args)
         for old in glob.glob(self.source.final + '-temp-*.' +
-                             self.source.mp4ext):
-            shutil.move(old, self.source.mp4)
+                             self.source.ext):
+            shutil.move(old, self.source.final_file)
     
     def _simple_tags(self, version):
         'Adds single-argument or standalone tags into the MP4 file.'
@@ -990,14 +1051,15 @@ class MP4Metadata:
         '''Performs each of the above steps involved in embedding metadata,
         using version as the encodingTool tag.'''
         if self.enabled:
-            logging.info('*** Adding metadata to %s ***' % self.source.mp4)
+            logging.info('*** Adding metadata to %s ***'
+                         % self.source.final_file)
             self._simple_tags(version)
             self._longer_tags()
             self._credits()
     
     def clean_tmp(self):
         'Removes any leftover MP4 files created by AtomicParsley.'
-        files = u'%s-temp-*.%s' % (self.source.final, self.source.mp4ext)
+        files = u'%s-temp-*.%s' % (self.source.final, self.source.ext)
         for old in glob.glob(files):
             _clean(old)
 
@@ -1108,7 +1170,7 @@ class MKVMetadata:
         _clean(self._tags)
         if not self.enabled:
             return []
-        logging.info('*** Adding metadata to %s ***' % self.source.mkv)
+        logging.info('*** Adding metadata to %s ***' % self.source.final_file)
         self._add_tags(version)
         self._credits()
         data = self._doc.toprettyxml(encoding = 'UTF-8', indent = '  ')
@@ -1132,8 +1194,6 @@ class Transcoder:
     '''Base class which invokes tools necessary to extract, split, demux
     and encode the media.'''
     seg = 0
-    video = ''
-    audio = ''
     subtitles = None
     chapters = None
     metadata = None
@@ -1150,11 +1210,11 @@ class Transcoder:
         self._join = source.base + '-join.ts'
         self._demux = source.base + '-demux'
         self._wav = source.base + '.wav'
-        self._h264 = source.base + '.h264'
-        self._vp8 = source.base + '.vp8'
-        self._aac = source.base + '.aac'
-        self._ogg = source.base + '.ogg'
-        self._flac = source.base + '.flac'
+        self.video = source.base + '.' + self.opts.video
+        if self.opts.audio == 'vorbis':
+            self.audio = source.base + '.ogg'
+        else:
+            self.audio = source.base + '.' + self.opts.audio
         self.check()
     
     def check(self):
@@ -1163,22 +1223,32 @@ class Transcoder:
         codecs = ['ffmpeg', '-codecs']
         if not _ffmpeg_ver():
             raise RuntimeError('FFmpeg is not installed.')
-        if not self.opts.vp8 and not _ver(codecs, '--enable-(libx264)'):
+        if self.opts.video not in ['h264', 'vp8']:
+            raise RuntimeError('No video codec chosen.')
+        if (self.opts.video == 'h264' and
+            not _ver(codecs, '--enable-(libx264)')):
             raise RuntimeError('FFmpeg does not support libx264.')
-        if self.opts.vp8 and not _ver(codecs, '--enable-(libvpx)'):
+        elif (self.opts.video == 'vp8' and
+              not _ver(codecs, '--enable-(libvpx)')):
             raise RuntimeError('FFmpeg does not support libvpx.')
-        if self.opts.nero:
-            if not _nero_ver():
+        if self.opts.audio not in ['aac', 'vorbis', 'flac']:
+            raise RuntimeError('No audio codec chosen.')
+        if self.opts.audio == 'aac':
+            if self.opts.aac_encoder not in ['nero', 'faac', 'ffmpeg-aac']:
+                raise RuntimeError('No AAC encoder chosen.')
+            if self.opts.aac_encoder == 'nero' and not _nero_ver():
                 raise RuntimeError('neroAacEnc is not installed.')
-        elif self.opts.flac:
-            if not _ver(codecs, 'EA.*(flac)'):
-                raise RuntimeError('FFmpeg does not support FLAC.')
-        elif self.opts.vp8:
-            if not _ver(codecs, '--enable-(libvorbis)'):
-                raise RuntimeError('FFmpeg does not support libvorbis.')
-        elif not _ver(codecs, '--enable-(libfaac)'):
-            raise RuntimeError('FFmpeg does not support libfaac. ' +
-                               '(Perhaps try using neroAacEnc?)')
+            elif (self.opts.aac_encoder == 'faac' and
+                  not _ver(codecs, '--enable-(libfaac)')):
+                raise RuntimeError('FFmpeg does not support libfaac.')
+            elif (self.opts.aac_encoder == 'ffmpeg-aac' and
+                  not _ver(codecs, 'EA.*(aac)\s+')):
+                raise RuntimeError('FFmpeg does not support ffmpeg-aac.')
+        elif self.opts.audio == 'flac' and not _ver(codecs, 'EA.*(flac)\s+'):
+            raise RuntimeError('FFmpeg does not support FLAC.')
+        elif (self.opts.audio == 'vorbis' and
+              not _ver(codecs, '--enable-(libvorbis)')):
+            raise RuntimeError('FFmpeg does not support libvorbis.')
         if not self.source.meta_present:
             self.metadata.enabled = False
     
@@ -1187,7 +1257,7 @@ class Transcoder:
         an MPEG-TS video clip from clip[0] to clip[1]. All values are
         in seconds.'''
         logging.info('*** Extracting segment %d: [%s - %s] ***' %
-                     (self.seg, _seconds_to_time(clip[0]),
+                     (self.seg + 1, _seconds_to_time(clip[0]),
                       _seconds_to_time(clip[1])))
         self.chapters.add(elapsed, self.seg)
         args = ['ffmpeg', '-y', '-i', self.source.orig, '-ss', str(clip[0]),
@@ -1207,11 +1277,11 @@ class Transcoder:
         (pos, elapsed) = (0, 0)
         for cut in self.source.cutlist:
             (start, end) = cut
-            if start > self.opts.thresh and start > pos:
+            if start > self.opts.clip_thresh and start > pos:
                 self._extract((pos, start), elapsed)
             elapsed += start - pos
             pos = end
-        if pos < self.source.duration - self.opts.thresh:
+        if pos < self.source.duration - self.opts.clip_thresh:
             self._extract((pos, self.source.duration), elapsed)
             elapsed += self.source.duration - pos
             pos = self.source.duration
@@ -1329,7 +1399,7 @@ class Transcoder:
         one file, and then extract each media stream (video / audio) from the
         container into separate raw data files.'''
         logging.info('*** Demuxing video ***')
-        name = os.path.split(self._demux)[-1]
+        name = os.path.basename(self._demux)
         try:
             _cmd(['java', '-jar', self.opts.projectx, '-out', self.opts.tmp,
                   '-name', name, '-demux', self._join])
@@ -1370,59 +1440,77 @@ class Transcoder:
     
     def encode_video(self):
         'Invokes ffmpeg to transcode the video stream to H.264 or VP8.'
-        prof = []
-        (fmt, codec, target) = ('', '', '')
+        preset, threads, rate, speed = [], [], [], []
+        fmt, codec = '', ''
         if self.opts.preset:
-            prof = ['-vpre', self.opts.preset]
-        if self.opts.ipod:
-            (fmt, codec, target) = ('ipod', 'libx264', self._h264)
-        elif self.opts.webm:
-            (fmt, codec, target) = ('webm', 'libvpx', self._vp8)
-        elif self.opts.vp8:
-            (fmt, codec, target) = ('matroska', 'libvpx', self._vp8)
-        else:
-            (fmt, codec, target) = ('mp4', 'libx264', self._h264)
-        _clean(target)
+            preset = ['-vpre', self.opts.preset]
+        if self.opts.video == 'vp8':
+            fmt, codec = 'matroska', 'libvpx'
+            if self.opts.webm:
+                fmt, codec = 'webm', 'libvpx'
+            if self.opts.vp8_rc == 'vbr':
+                rate = ['-vb', '%dk' % self.opts.video_br]
+            elif self.opts.vp8_rc == 'cbr':
+                r = '%dk' % self.opts.video_br
+                rate = ['-minrate', r, '-maxrate', r, '-vb', r]
+            if self.opts.vp8_speed is not None:
+                speed = ['-speed', self.opts.vp8_speed]
+        elif self.opts.video == 'h264':
+            fmt, codec = 'mp4', 'libx264'
+            if self.opts.ipod:
+                fmt, codec = 'ipod', 'libx264'
+            if self.opts.h264_rc == 'crf':
+                rate = ['-crf', self.opts.video_crf]
+            elif self.opts.h264_rc == 'cbr':
+                rate = ['-vb', '%dk' % self.opts.video_br]
+            if self.opts.h264_speed is not None:
+                speed = ['-preset', self.opts.h264_speed]
+        if self.opts.threads is not None:
+            threads = ['-threads', self.opts.threads]
+        _clean(self.video)
         size = self._adjust_res()
         common = ['ffmpeg', '-y', '-i', self._demux_v, '-vcodec', codec,
-                  '-an', '-threads', 0, '-f', fmt] + prof + size
+                  '-an', '-f', fmt]
+        common += preset + rate + speed + size + threads
         if self.opts.two_pass:
             logging.info(u'*** Encoding video to %s - first pass ***' %
                          self.opts.tmp)
-            common += ['-vb', '%dk' % self.opts.video_br]
-            _cmd(common + ['-pass', 1, os.devnull],
-                 cwd = self.opts.tmp)
+            _cmd(common + ['-pass', 1, os.devnull], cwd = self.opts.tmp)
             logging.info(u'*** Encoding video to %s - second pass ***' %
-                         target)
-            _cmd(common + ['-pass', 2, target],
-                 cwd = self.opts.tmp)
+                         self.video)
+            _cmd(common + ['-pass', 2, self.video], cwd = self.opts.tmp)
         else:
-            logging.info(u'*** Encoding video to %s ***' % target)
-            _cmd(common + ['-crf', self.opts.video_crf, target])
-        self.video = target
+            logging.info(u'*** Encoding video to %s ***' % self.video)
+            _cmd(common + [self.video])
     
     def encode_audio(self):
         '''Invokes ffmpeg or neroAacEnc to transcode the audio stream to
         AAC, Vorbis or FLAC.'''
-        (fmt, codec, target) = ('', '', '')
-        if self.opts.flac:
-            (fmt, codec, target) = ('flac', 'flac', self._flac)
-        elif self.opts.vp8:
-            (fmt, codec, target) = ('ogg', 'libvorbis', self._ogg)
-        else:
-            (fmt, codec, target) = ('aac', 'libfaac', self._aac)
-        _clean(target)
-        logging.info(u'*** Encoding audio to %s ***' % target)
-        if fmt == 'aac' and self.opts.nero:
+        fmt, codec = '', ''
+        channels = []
+        if self.opts.audio == 'flac':
+            fmt, codec = 'flac', 'flac'
+        elif self.opts.audio == 'vorbis':
+            fmt, codec = 'ogg', 'libvorbis'
+        elif self.opts.audio == 'aac':
+            fmt = 'aac'
+            if self.opts.aac_encoder == 'faac':
+                codec = 'libfaac'
+            elif self.opts.aac_encoder == 'ffmpeg-aac':
+                codec = 'aac'
+        if self.opts.downmix_to_stereo and self.source.surround:
+            channels = ['-ac', 2]
+        _clean(self.audio)
+        logging.info(u'*** Encoding audio to %s ***' % self.audio)
+        if self.opts.audio == 'aac' and self.opts.aac_encoder == 'nero':
             _cmd(['ffmpeg', '-y', '-i', self._demux_a, '-vn', '-acodec',
-                  'pcm_s16le', '-f', 'wav', self._wav])
+                  'pcm_s16le', '-f', 'wav'] + channels + [self._wav])
             _cmd(['neroAacEnc', '-q', self.opts.audio_q, '-if', self._wav,
-                  '-of', target])
+                  '-of', self.audio])
         else:
             _cmd(['ffmpeg', '-y', '-i', self._demux_a, '-vn', '-acodec',
-                  codec, '-ab', '%dk' % self.opts.audio_br, '-f', fmt,
-                  target])
-        self.audio = target
+                  codec, '-ab', '%dk' % self.opts.audio_br, '-f', fmt]
+                 + channels + [self.audio])
     
     def clean_video(self):
         'Removes the temporary video stream data.'
@@ -1432,15 +1520,23 @@ class Transcoder:
         'Removes the temporary audio stream data.'
         _clean(self._demux_a)
     
+    def clean_split(self):
+        'Removes temporary video clips used before rejoining.'
+        for split in self._split:
+            _clean(split)
+    
+    def clean_join(self):
+        'Removes the temporary rejoined MPEG-2 video data.'
+        _clean(self._join)
+    
     def clean_tmp(self):
         'Removes any temporary files generated during encoding.'
         self.clean_video()
         self.clean_audio()
-        for split in self._split:
-            _clean(split)
+        self.clean_split()
+        self.clean_join()
         for demux in self._demuxed:
             _clean(demux)
-        _clean(self._join)
         _clean(self._wav)
         _clean(self.video)
         _clean(self.audio)
@@ -1470,17 +1566,17 @@ class MP4Transcoder(Transcoder):
         '''Invokes MP4Box to combine the audio, video and subtitle streams
         into the MPEG-4 target file, also embedding chapter data and
         metadata.'''
-        logging.info(u'*** Remuxing to %s ***' % self.source.mp4)
+        logging.info(u'*** Remuxing to %s ***' % self.source.final_file)
         self.source.make_final_dir()
-        _clean(self.source.mp4)
+        _clean(self.source.final_file)
         common = ['MP4Box', '-tmp', self.opts.final_path]
         _cmd(common + ['-new', '-add', '%s#video:name=Video' % self.video,
                        '-add', '%s#audio:name=Audio' % self.audio,
-                       self.source.mp4])
-        _cmd(common + ['-isma', '-hint', self.source.mp4])
+                       self.source.final_file])
+        _cmd(common + ['-isma', '-hint', self.source.final_file])
         self.subtitles.write()
         self.chapters.write()
-        _cmd(common + ['-lang', self.opts.language, self.source.mp4])
+        _cmd(common + ['-lang', self.opts.language, self.source.final_file])
         self.metadata.write(_version(self.opts))
     
     def clean_tmp(self):
@@ -1511,13 +1607,13 @@ class MKVTranscoder(Transcoder):
         '''Invokes mkvmerge to combine the audio, video and subtitle streams
         into the Matroska target file, also embedding chapter data and
         metadata.'''
-        logging.info(u'*** Remuxing to %s ***' % self.source.mkv)
+        logging.info(u'*** Remuxing to %s ***' % self.source.final_file)
         self.source.make_final_dir()
-        _clean(self.source.mkv)
+        _clean(self.source.final_file)
         common = ['--no-chapters', '-B', '-T', '-M', '--no-global-tags']
         args = ['mkvmerge']
         args += ['--default-language', _iso_639_2(self.opts.language)]
-        args += common + ['-A', '-S', '--track-name', '0:Video', self.video]
+        args += common + ['-A', '-S', '--track-name', '1:Video', self.video]
         args += common + ['-D', '-S', '--track-name', '0:Audio', self.audio]
         subs = self.subtitles.write()
         if len(subs) > 0:
@@ -1526,7 +1622,7 @@ class MKVTranscoder(Transcoder):
         args += self.metadata.write(_version(self.opts))
         if self.opts.webm:
             args += ['--webm']
-        args += ['-o', self.source.mkv]
+        args += ['-o', self.source.final_file]
         _cmd(args)
     
     def clean_tmp(self):
@@ -1542,6 +1638,7 @@ class Source(dict):
     fps = None
     resolution = None
     duration = None
+    surround = False
     cutlist = None
     vstreams = 0
     astreams = 0
@@ -1549,10 +1646,10 @@ class Source(dict):
     orig = None
     rating = None
     final = None
-    mp4 = None
-    mkv = None
+    final_file = None
     meta_present = False
     split_args = None
+    job = None
     
     def __repr__(self):
         season = int(self.get('season', 0))
@@ -1577,10 +1674,16 @@ class Source(dict):
         else:
             opts.tmp = tempfile.mkdtemp(prefix = u'transcode_')
             self.remove_tmp = True
-        if opts.ipod:
-            self.mp4ext = 'm4v'
-        else:
-            self.mp4ext = 'mp4'
+        if opts.container == 'mp4':
+            if opts.ipod:
+                self.ext = 'm4v'
+            else:
+                self.ext = 'mp4'
+        if opts.container == 'mkv':
+            if opts.webm:
+                self.ext = 'webm'
+            else:
+                self.ext = 'mkv'
         self.tvdb = MythTV.ttvdb.tvdb_api.Tvdb(language = self.opts.language)
     
     def _check_split_args(self):
@@ -1588,12 +1691,8 @@ class Source(dict):
         during splits or frame queries. Versions 0.7 and older use -newaudio /
         -newvideo tags for each additional stream present. Versions 0.8 and
         newer use -map 0:v -map 0:a to automatically copy over all streams.'''
-        match = re.search('[Ff]+mpeg\s+(.*)$', _ffmpeg_ver())
-        if not match:
-            raise RuntimeError('FFmpeg version could not be determined.')
-        ver = match.group(1)
-        match = re.match('^([0-9]+\.[0-9]+)', ver)
-        if match and float(match.group(1)) <= 0.7:
+        has_c = _ver(['ffmpeg', '-help'], '^(-c codec)')
+        if not has_c:
             args = [['-acodec', 'copy', '-vcodec', 'copy',
                      '-f', 'mpegts']]
             for astream in xrange(1, self.astreams):
@@ -1803,59 +1902,77 @@ class Source(dict):
     def print_options(self):
         'Outputs the user-selected options to the log.'
         logging.info('*** Printing configuration ***')
-        (fmt, audio, video, ext) = '', '', '', ''
+        fmt, audio, video = '', '', ''
         if self.opts.webm:
-            (fmt, ext) = 'WebM', 'webm'
+            fmt = 'WebM'
         elif self.opts.ipod:
-            (fmt, ext) = 'iPod Touch compatible MPEG-4', 'm4v'
-        elif self.opts.matroska:
-            (fmt, ext) = 'Matroska', 'mkv'
-        else:
-            (fmt, ext) = 'MPEG-4', 'mp4'
-        if self.opts.vp8:
+            fmt = 'iPod Touch compatible MPEG-4'
+        elif self.opts.container == 'mkv':
+            fmt = 'Matroska'
+        elif self.opts.container == 'mp4':
+            fmt = 'MPEG-4'
+        if self.opts.video == 'vp8':
             video = 'On2 VP8'
-        else:
+        elif self.opts.video == 'h264':
             video = 'H.264 AVC'
-        if self.opts.flac:
+        if self.opts.audio == 'flac':
             audio = 'FLAC'
-        elif self.opts.vp8:
+        elif self.opts.audio == 'vorbis':
             audio = 'Ogg Vorbis'
-        elif self.opts.nero:
-            audio = 'AAC (neroAacEnc)'
-        else:
-            audio = 'AAC (libfaac)'
+        elif self.opts.audio == 'aac':
+            audio = 'AAC'
+            if self.opts.aac_encoder == 'nero':
+                audio += ' (neroAacEnc)'
+            elif self.opts.aac_encoder == 'faac':
+                audio += ' (libfaac)'
+            elif self.opts.aac_encoder == 'ffmpeg-aac':
+                audio += ' (ffmpeg-aac)'
         logging.info('  Format: %s, %s, %s' % (fmt, video, audio))
         enc = '  Video options:'
         if self.opts.preset:
             enc += ' preset \'%s\',' % self.opts.preset
         if self.opts.resolution:
             enc += ' resolution %dx%d,' % self.opts.resolution
+        if self.opts.video == 'h264':
+            if self.opts.h264_rc == 'crf':
+                enc += ' crf = %d,' % self.opts.video_crf
+            elif self.opts.h264_rc == 'cbr':
+                enc += ' cbr = %d kb/s,' % self.opts.video_br
+            if self.opts.h264_speed:
+                enc += ' %s speed,' % self.opts.h264_speed
+        if self.opts.video == 'vp8':
+            if self.opts.vp8_rc == 'vbr':
+                enc += ' vbr = %d kb/s,' % self.opts.video_br
+            elif self.opts.vp8_rc == 'cbr':
+                enc += ' cbr = %d kb/s,' % self.opts.video_br
+            if self.opts.vp8_speed:
+                enc += ' speed %s,' % self.opts.vp8_speed
         if self.opts.two_pass:
-            enc += ' two-pass, br: %dk' % self.opts.video_br
+            enc += ' two-pass'
         else:
-            enc += ' one-pass, crf: %d' % self.opts.video_crf
+            enc += ' one-pass'
         logging.info(enc)
         logging.info('  Source file: %s' % self.orig)
-        logging.info('  Target file: %s.%s' % (self.final, ext))
+        logging.info('  Target file: %s' % self.final_file)
         logging.info('  Temporary directory: %s' % self.opts.tmp)
     
     def final_name(self):
         '''Obtains the filename of the target MPEG-4 file using the format
         string. Formatting is (mostly) compatible with Recorded.formatPath()
         from dataheap.py, and the format used in mythrename.pl.'''
-        final = os.path.join(self.opts.final_path,
-                             os.path.split(self.base)[-1])
+        final = os.path.join(self.opts.final_path, os.path.basename(self.base))
         if self.meta_present:
-            path = self.opts.format
+            path = re.sub('\\\\', '/', self.opts.format)
             tags = [('%T', 'title'), ('%S', 'subtitle'), ('%R', 'description'),
                     ('%C', 'category'), ('%n', 'syndicatedepisodenumber'),
                     ('%s', 'season'), ('%E', 'episode'), ('%r', 'rating')]
             for tag, key in tags:
                 if self.get(key) is not None:
                     val = unicode(self.get(key))
-                    val = val.replace('/', self.opts.replace_char)
-                    if os.name == 'nt':
-                        val = val.replace('\\', self.opts.replace_char)
+                    val = val.replace(os.path.sep, self.opts.replace_char)
+                    if os.path.altsep:
+                        val = val.replace(os.path.altsep,
+                                          self.opts.replace_char)
                     path = path.replace(tag, val)
                 else:
                     path = path.replace(tag, '')
@@ -1901,22 +2018,31 @@ class MythSource(Source):
     '''Obtains the raw MPEG-2 video data from a MythTV database along with
     metadata and a commercial-skip cutlist.'''
     prog = None
+    db = None
     
     class _Rating(MythTV.DBDataRef):
         'Query for the content rating within the MythTV database.'
         _table = 'recordedrating'
         _ref = ['chanid', 'starttime']
     
+    def __init__(self, jobid, opts):
+        self._get_db(opts)
+        try:
+            self.job = MythTV.Job(jobid, db = self.db)
+        except MythTV.exceptions.MythError:
+            raise ValueError('Could not find job ID %d.' % jobid)
+        channel = int(self.job.chanid)
+        time = long(self.job.starttime.strftime('%Y%m%d%H%M%S'))
+        self.__init__(channel, time, opts)
+    
     def __init__(self, channel, time, opts):
         Source.__init__(self, opts)
+        self.chanid = channel
         self.channel = channel
         self.time = _convert_time(time)
         self.base = os.path.join(opts.tmp, '%s_%s' % (str(channel), str(time)))
         self.orig = self.base + '-orig.mpg'
-        self.db_info = {'DBHostName' : opts.host, 'DBName' : opts.database,
-                        'DBUserName' : opts.user, 'DBPassword' : opts.password,
-                        'SecurityPin' : opts.pin}
-        self.db = MythTV.MythDB(**self.db_info)
+        self._get_db(opts)
         try:
             self.rec = MythTV.Recorded((channel, time), db = self.db)
         except MythTV.exceptions.MythError:
@@ -1931,11 +2057,14 @@ class MythSource(Source):
         self.rating = self._Rating(self.rec._wheredat, self.db)
         self._fetch_metadata()
         self.final = self.final_name()
-        self.mp4 = '%s.%s' % (self.final, self.mp4ext)
-        if self.opts.webm:
-            self.mkv = self.final + '.webm'
-        else:
-            self.mkv = self.final + '.mkv'
+        self.final_file = '%s.%s' % (self.final, self.ext)
+    
+    def _get_db(self, opts):
+        'Connects to the MythTV MySQL database.'
+        self.db_info = {'DBHostName' : opts.host, 'DBName' : opts.database,
+                        'DBUserName' : opts.user, 'DBPassword' : opts.password,
+                        'SecurityPin' : opts.pin}
+        self.db = MythTV.MythDB(**self.db_info)
     
     def _frame_to_timecode(self, frame):
         '''Uses ffmpeg to remux a given number of frames in the video file
@@ -2002,21 +2131,60 @@ class MythSource(Source):
         specified path, if enough space is available.'''
         bs = 4096 * 1024
         logging.info('*** Copying video to %s ***' % self.orig)
-        source = self.rec.open()
-        try:
+        with self.rec.open() as source:
             with open(self.orig, 'wb') as dest:
-                data = source.read(bs);
+                data = source.read(bs)
                 while len(data) > 0:
                     dest.write(data)
                     data = source.read(bs)
-        finally:
-            source.close()
         (self.fps, self.resolution, self.duration,
          self.vstreams, self.astreams) = self.video_params()
         if not self.fps or not self.resolution or not self.duration:
             raise RuntimeError('Could not determine video parameters.')
         self.opts.resolution = self.parse_resolution(self.opts.resolution)
         self._cut_list()
+    
+    def _clean_cutlist(self):
+        '''Removes commercial-skip and cut marks from the cutlist.
+        Adapted from http://www.mythtv.org/wiki/Transcode_wrapper_stub'''
+        markup = []
+        comm_start = self.rec.markup.MARK_COMM_START
+        comm_end = self.rec.markup.MARK_COMM_END
+        cut_start = self.rec.markup.MARK_CUT_START
+        cut_end = self.rec.markup.MARK_CUT_END
+        for (index, mark) in reversed(list(enumerate(self.rec.markup))):
+            if mark.type in (comm_start, comm_end, cut_start, cut_end):
+                del self.rec.markup[index]
+        self.rec.markup.commit()
+        self.rec.bookmark = 0
+        self.rec.cutlist = 0
+    
+    def _rebuild_seek(self):
+        'Queues a MythTV job to rebuild the seek table for the recording.'
+        self.rec.seek.clean()
+        data = {'chanid' : self.chanid, 'starttime' : self.time,
+                'type' : MythTV.Job.COMMFLAG, 'args' : '--rebuild'}
+        job = MythTV.Job(db = self.db).create(data = data)
+    
+    def import_mythtv(self):
+        '''Imports the transcoded video into MythTV, overwriting the original
+        MPEG-2 recording, and adjusting the Recorded table to match.'''
+        bs = 4096 * 1024
+        logging.info('*** Importing video into MythTV ***')
+        self.rec.basename = os.path.basename(self.final_file)
+        with open(self.final_file, 'r') as source:
+            with self.rec.open('w') as dest:
+                data = source.read(bs)
+                while len(data) > 0:
+                    dest.write(data)
+                    data = source.read(bs)
+        self._clean_cutlist()
+        if self.opts.use_tvdb_rating and self.get('popularity') is not None:
+            self.rec.stars = round(self.get('popularity') / 51.0 * 2) / 10.0
+        self.rec.filesize = long(os.path.getsize(self.final_file))
+        self.rec.transcoded = 1
+        self.rec.update()
+        self._rebuild_seek()
 
 class WTVSource(Source):
     '''Obtains the raw MPEG-2 video data from a Windows TV recording (.WTV)
@@ -2039,13 +2207,12 @@ class WTVSource(Source):
             b = self.channel + '_' + t
             self.base = os.path.join(opts.tmp, '%s_%s' % (self.channel, t))
         else:
-            f = os.path.split(wtv)[-1]
+            f = os.path.basename(wtv)
             self.base = os.path.join(opts.tmp, os.path.splitext(f)[0])
         self.orig = self.base + '-orig.ts'
         self._fetch_metadata()
         self.final = self.final_name()
-        self.mp4 = '%s.%s' % (self.final, self.mp4ext)
-        self.mkv = self.final + '.mkv'
+        self.final_file = '%s.%s' % (self.final, self.ext)
     
     def _cut_list(self):
         '''Obtains a commercial-skip cutlist from previously generated
@@ -2142,13 +2309,19 @@ class WTVSource(Source):
 
 if __name__ == '__main__':
     sys.stdout = codecs.getwriter('utf8')(sys.stdout)
-    parser = _get_options()
-    (opts, args) = parser.parse_args()
+    defaults = _read_options()
+    parser = _get_options(defaults)
+    opts, args = parser.parse_args()
+    _collapse_args(defaults, opts)
     _check_args(args, parser, opts)
     s = None
     if len(args) == 1:
-        wtv = args[0]
-        s = WTVSource(wtv, opts)
+        if args[0].isdigit():
+            jobid = int(args[0])
+            s = MythSource(jobid, opts)
+        else:
+            wtv = args[0]
+            s = WTVSource(wtv, opts)
     else:
         channel = int(args[0])
         timecode = long(args[1])
@@ -2156,7 +2329,7 @@ if __name__ == '__main__':
     s.copy()
     s.print_metadata()
     s.print_options()
-    if opts.matroska:
+    if opts.container == 'mkv':
         t = MKVTranscoder(s, opts)
     else:
         t = MP4Transcoder(s, opts)
@@ -2171,6 +2344,8 @@ if __name__ == '__main__':
     t.remux()
     t.clean_tmp()
     s.clean_tmp()
+    if type(s) == MythSource and opts.import_mythtv:
+        s.import_mythtv()
 
 # Copyright (c) 2012, Lucas Jacobs
 # All rights reserved.
