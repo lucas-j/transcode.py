@@ -23,6 +23,7 @@ Requirements:
 - Java (http://www.java.com)
 - Project-X (http://project-x.sourceforge.net)
 - remuxTool.jar (http://babgvant.com/downloads/dburckh/remuxTool.jar)
+- ccextractor (http://ccextractor.sourceforge.net) (optional)
 - Python 2.7 (http://www.python.org)
   - lxml (http://lxml.de)
   - mysql-python (http://sourceforge.net/projects/mysql-python)
@@ -30,7 +31,8 @@ Requirements:
 
 For MPEG-4 / H.264:
 - MP4Box (http://gpac.sourceforge.net)
-- neroAacEnc (http://www.nero.com/enu/technologies-aac-codec.html)
+- neroAacEnc (http://www.nero.com/enu/technologies-aac-codec.html) (optional)
+- AtomicParsley (https://bitbucket.org/wez/atomicparsley) (optional)
 - FFmpeg must be compiled with --enable-libx264
 - if using faac for audio, FFmpeg must be compiled with --enable-libfaac
 
@@ -38,12 +40,9 @@ For Matroska / VP8:
 - MKVToolNix (http://www.bunkus.org/videotools/mkvtoolnix/)
 - FFmpeg must be compiled with --enable-libvpx and --enable-libvorbis
 
-Optional dependencies:
-- ccextractor (http://ccextractor.sourceforge.net)
-- AtomicParsley (https://bitbucket.org/wez/atomicparsley)
-
 Most of these packages can usually be found in various Linux software
-repositories or as pre-compiled Windows binaries.
+repositories or as pre-compiled Windows binaries. Most precompiled FFmpeg
+binaries include support for everything listed above except libfaac.
 
 Setup:
 - Make sure the above dependencies are installed on your system. Add each
@@ -228,11 +227,13 @@ def _cmd(args, cwd = None, expected = 0):
     args = [unicode(arg).encode('utf_8') for arg in args]
     ret = 0
     logging.debug('$ %s' % u' '.join(args))
+    time.sleep(.25)
     proc = subprocess.Popen(args, stdout = subprocess.PIPE,
                             stderr = subprocess.STDOUT, cwd = cwd)
     for line in proc.stdout:
         logging.debug(line.replace('\n', ''))
     ret = proc.wait()
+    time.sleep(.25)
     if ret != 0 and ret != expected:
         raise RuntimeError('Unexpected return code', u' '.join(args), ret)
     return ret
@@ -1351,7 +1352,7 @@ class Transcoder:
         target = self.opts.resolution
         if target is not None:
             aspect = res[0] * 1.0 / res[1]
-            if aspect > target[0] / target[1]:
+            if aspect > target[0] * 1.0 / target[1]:
                 vres = int(round(target[0] / aspect))
                 if vres % 2 == 1:
                     vres += 1
