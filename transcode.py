@@ -23,7 +23,6 @@ Requirements:
 - Java (http://www.java.com)
 - Project-X (http://project-x.sourceforge.net)
 - remuxTool.jar (http://babgvant.com/downloads/dburckh/remuxTool.jar)
-- ccextractor (http://ccextractor.sourceforge.net) (optional)
 - Python 2.7 (http://www.python.org)
   - lxml (http://lxml.de)
   - mysql-python (http://sourceforge.net/projects/mysql-python)
@@ -31,8 +30,7 @@ Requirements:
 
 For MPEG-4 / H.264:
 - MP4Box (http://gpac.sourceforge.net)
-- neroAacEnc (http://www.nero.com/enu/technologies-aac-codec.html) (optional)
-- AtomicParsley (https://bitbucket.org/wez/atomicparsley) (optional)
+- neroAacEnc (http://www.nero.com/enu/technologies-aac-codec.html)
 - FFmpeg must be compiled with --enable-libx264
 - if using faac for audio, FFmpeg must be compiled with --enable-libfaac
 
@@ -40,9 +38,12 @@ For Matroska / VP8:
 - MKVToolNix (http://www.bunkus.org/videotools/mkvtoolnix/)
 - FFmpeg must be compiled with --enable-libvpx and --enable-libvorbis
 
+Optional dependencies:
+- ccextractor (http://ccextractor.sourceforge.net)
+- AtomicParsley (https://bitbucket.org/wez/atomicparsley)
+
 Most of these packages can usually be found in various Linux software
-repositories or as pre-compiled Windows binaries. Most precompiled FFmpeg
-binaries include support for everything listed above except libfaac.
+repositories or as pre-compiled Windows binaries.
 
 Setup:
 - Make sure the above dependencies are installed on your system. Add each
@@ -233,13 +234,13 @@ def _cmd(args, cwd = None, expected = 0):
     args = [unicode(arg).encode('utf_8') for arg in args]
     ret = 0
     logging.debug('$ %s' % u' '.join(args))
-    time.sleep(.25)
+    time.sleep(0.5)
     proc = subprocess.Popen(args, stdout = subprocess.PIPE,
                             stderr = subprocess.STDOUT, cwd = cwd)
     for line in proc.stdout:
         logging.debug(line.replace('\n', ''))
     ret = proc.wait()
-    time.sleep(.25)
+    time.sleep(0.5)
     if ret != 0 and ret != expected:
         raise RuntimeError('Unexpected return code', u' '.join(args), ret)
     return ret
@@ -750,7 +751,7 @@ class Subtitles:
             for line in subs:
                 match = re.search(regex, line)
                 if match:
-                    (start, end) = _convert_timestamp(match)
+                    start, end = _convert_timestamp(match)
                     start += delay
                     end += delay
                     if curr < len(self.marks) and self.marks[curr] < end:
@@ -1360,9 +1361,9 @@ class Transcoder:
             videoRE = re.compile('Video: PID 0x([0-9A-Fa-f]+)')
             audioRE = re.compile('Audio: PID 0x([0-9A-Fa-f]+)')
             fileRE = re.compile('\'(.*)\'\s*$')
-            (curr_v, curr_a) = (1, 1)
-            (found_v, found_a) = (0, 0)
-            (targ_v, targ_a) = (0, 0)
+            curr_v, curr_a = 1, 1
+            found_v, found_a = 0, 0
+            targ_v, targ_a = 0, 0
             for line in log:
                 match = re.search(videoRE, line)
                 if match:
@@ -2186,6 +2187,13 @@ class MythSource(Source):
         self.rec.update()
         self._rebuild_seek()
 
+    def import_mythvideo(self):
+        '''Imports the transcoded video into MythTV's general-purpose video
+        database (MythVideo) along with metadata.'''
+        bs = 4096 * 1024
+        logging.info('*** Importing video into MythVideo ***')
+        
+        
 class WTVSource(Source):
     '''Obtains the raw MPEG-2 video data from a Windows TV recording (.WTV)
     along with embedded metadata.'''
