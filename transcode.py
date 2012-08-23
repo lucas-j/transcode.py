@@ -228,14 +228,24 @@ def _filter_xml(data):
     regex = '<([^/>]+)>\s*(.+)\s*</([^/>]+)>'
     sub = '<\g<1>>\g<2></\g<3>>'
     return re.sub(regex, sub, data)
-    
+
+def _list_to_utf8(args):
+    'Converts a list of objects into UTF-8 strings.'
+    out = []
+    for arg in args:
+        if type(arg) is unicode:
+            out.append(arg.encode('utf_8'))
+        else:
+            out.append(str(arg))
+    return out
+
 def _cmd(args, cwd = None, expected = 0):
     '''Executes an external command with the given working directory, ignoring
     all output. Raises a RuntimeError exception if the return code of the
     subprocess isn't what is expected.'''
-    args = [unicode(arg).encode('utf_8') for arg in args]
+    args = _list_to_utf8(args)
     ret = 0
-    logging.debug('$ %s' % u' '.join(args))
+    logging.debug('$ %s' % ' '.join(args))
     time.sleep(0.5)
     proc = subprocess.Popen(args, stdout = subprocess.PIPE,
                             stderr = subprocess.STDOUT, cwd = cwd)
@@ -244,7 +254,7 @@ def _cmd(args, cwd = None, expected = 0):
     ret = proc.wait()
     time.sleep(0.5)
     if ret != 0 and ret != expected:
-        raise RuntimeError('Unexpected return code', u' '.join(args), ret)
+        raise RuntimeError('Unexpected return code', ' '.join(args), ret)
     return ret
 
 def _ver(args, regex, use_stderr = True):
