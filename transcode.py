@@ -85,10 +85,11 @@ Special thanks to:
 '''
 
 # todo -
-# 1) simplify encode option parsing
+# 1) simplify encode option parsing (done)
 # 2) symlink / MythVideo integration
 # 3) MythLog / error handling
 # 4) better job handling
+# 5) Tmdb integration for movies
 
 # Changelog:
 # 1.3 - support for Matroska / VP8, fixed subtitle sync problems
@@ -123,6 +124,7 @@ import re, os, sys, math, datetime, subprocess, urllib, tempfile, glob
 import shutil, codecs, StringIO, time, optparse, unicodedata, logging
 import xml.dom.minidom
 import MythTV, MythTV.ttvdb.tvdb_api, MythTV.ttvdb.tvdb_exceptions
+import MythTV.tmdb.tmdb_api, MythTV.tmdb.tmdb_exceptions
 
 def _clean(filename):
     'Removes the file if it exists.'
@@ -379,11 +381,12 @@ def _get_defaults():
             'video_crf' : 23, 'preset' : None, 'h264_speed' : 'slow',
             'vp8_speed' : '0', 'threads' : 0, 'resolution' : None,
             'aac_encoder' : 'nero', 'audio_q' : 0.55, 'audio_br' : 192,
-            'downmix_to_stereo' : False, 'use_tvdb_rating' : True,
-            'use_tvdb_descriptions' : False, 'quiet' : False,
+            'downmix_to_stereo' : False, 'use_db_rating' : True,
+            'use_db_descriptions' : False, 'quiet' : False,
             'verbose' : False, 'clip_thresh' : 5,
             'projectx' : 'project-x/ProjectX.jar',
             'remuxtool' : 'remuxTool.jar' }
+    opts['.movie'] = {'format' : '%T'}
     opts['.mp4'] = {'video' : 'h264', 'audio' : 'aac'}
     opts['.mkv'] = {'video' : 'vp8', 'audio' : 'vorbis'}
     opts['.one_pass'] = {'h264_rc' : 'crf'}
@@ -415,8 +418,8 @@ def _add_option(opts, key, val):
         if val == '' or not val:
             val = None
     if key in ['import_mythtv', 'ipod', 'webm', 'two_pass',
-               'downmix_to_stereo', 'use_tvdb_rating',
-               'use_tvdb_descriptions', 'quiet', 'verbose']:
+               'downmix_to_stereo', 'use_db_rating',
+               'use_db_descriptions', 'quiet', 'verbose']:
         val = val.lower()
         if val in ['1', 't', 'y', 'true', 'yes', 'on']:
             val = True
@@ -610,20 +613,21 @@ def _get_options(opts):
                       _def_str(opts['downmix_to_stereo'], True))
     parser.add_option_group(auopts)
     mdopts = optparse.OptionGroup(parser, 'Metadata options')
-    mdopts.add_option('--rating', dest = 'use_tvdb_rating',
-                      action = 'store_true', default = opts['use_tvdb_rating'],
-                      help = 'include Tvdb episode rating (1 to 10) ' +
+    mdopts.add_option('--rating', dest = 'use_db_rating',
+                      action = 'store_true', default = opts['use_db_rating'],
+                      help = 'include Tvdb / TMDb rating (1 to 10) ' +
                       'as voted by users' +
-                      _def_str(opts['use_tvdb_rating'], True))
-    mdopts.add_option('--no-rating', dest = 'use_tvdb_rating',
-                      action = 'store_false', help = 'do not include Tvdb ' +
-                      'episode rating' +
-                      _def_str(opts['use_tvdb_rating'], False))
-    mdopts.add_option('--tvdb-description', dest = 'use_tvdb_descriptions',
+                      _def_str(opts['use_db_rating'], True))
+    mdopts.add_option('--no-rating', dest = 'use_db_rating',
+                      action = 'store_false', help = 'do not include Tvdb / ' +
+                      'Tmdb rating' +
+                      _def_str(opts['use_db_rating'], False))
+    mdopts.add_option('--db-description', dest = 'use_db_descriptions',
                       action = 'store_true',
-                      default = opts['use_tvdb_descriptions'], help = 'use ' +
-                      'episode descriptions from Tvdb when available' +
-                      _def_str(opts['use_tvdb_descriptions'], True))
+                      default = opts['use_db_descriptions'], help = 'use ' +
+                      'episode / movie descriptions from Tvdb / TMDb ' +
+                      'when available' +
+                      _def_str(opts['use_db_descriptions'], True))
     parser.add_option_group(mdopts)
     miopts = optparse.OptionGroup(parser, 'Miscellaneous options')
     miopts.add_option('-q', '--quiet', dest = 'quiet', action = 'store_true',
@@ -917,6 +921,14 @@ class MP4Metadata:
         else:
             return False
     
+    def _get_director(self):
+        '''Browses through the credits tuple and returns the first credited
+        director encountered.'''
+        for person in self.source.get('credits'):
+            if person[1] == 'director':
+                return person[0]
+        return None
+    
     def _sort_credits(self):
         '''Browses through the previously obtained list of credited people
         involved with the episode and returns three separate lists of
@@ -924,6 +936,7 @@ class MP4Metadata:
         cast = []
         directors = []
         producers = []
+        writers = []
         c = self.source.get('credits')
         for person in c:
             if person[1] in ['actor', 'host', '']:
@@ -939,8 +952,10 @@ class MP4Metadata:
                 producers.append(person[0])
         for person in c:
             if person[1] == 'writer':
-                producers.append(person[0])
-        return cast, directors, producers
+                writers.append(person[0])
+            if person[1] == 'screenwriter':
+                writers.append(person[0])
+        return cast, directors, producers, writers
     
     def _make_section(self, people, key_name, xml, doc):
         '''Creates an XML branch named key_name, adds each person contained
@@ -965,7 +980,7 @@ class MP4Metadata:
     def _make_credits(self):
         '''Returns an iOS-compatible XML document listing the actors, directors
         and producers involved with the episode.'''
-        (cast, directors, producers) = self._sort_credits()
+        (cast, directors, producers, writers) = self._sort_credits()
         imp = xml.dom.minidom.getDOMImplementation()
         dtd = '-//Apple Computer//DTD PLIST 1.0//EN'
         url = 'http://www.apple.com/DTDs/PropertyList-1.0.dtd'
@@ -978,6 +993,7 @@ class MP4Metadata:
         self._make_section(cast, 'cast', top, doc)
         self._make_section(directors, 'directors', top, doc)
         self._make_section(producers, 'producers', top, doc)
+        self._make_section(writers, 'screenwriters', top, doc)
         return doc
     
     def _perform(self, args):
@@ -994,15 +1010,27 @@ class MP4Metadata:
     def _simple_tags(self, version):
         'Adds single-argument or standalone tags into the MP4 file.'
         s = self.source
-        args = ['--stik', 'TV Show', '--encodingTool', version,
-                '--grouping', 'MythTV Recording']
+        if s.get('movie') is True:
+            args = ['--stik', 'Movie', '--encodingTool', version]
+        else:
+            args = ['--stik', 'TV Show', '--encodingTool', version]
+        if type(s) == WTVSource:
+            args += ['--grouping', 'Windows Media Center Recording']
+        else:
+            args += ['--grouping', 'MythTV Recording']
         if s.get('time') is not None:
             utc = s.time.strftime('%Y-%m-%dT%H:%M:%SZ')
             args += ['--purchaseDate', utc]
         if s.get('title') is not None:
             t = s['title']
-            args += ['--artist', t, '--album', t, '--albumArtist', t,
-                     '--TVShowName', t]
+            if s.get('movie') is not True:
+                args += ['--artist', t, '--album', t, '--albumArtist', t,
+                         '--TVShowName', t]
+            else:
+                args += ['--title', t]
+                director = self._get_director()
+                if director is not None:
+                    args += ['--artist', director]
         if s.get('subtitle') is not None:
             args += ['--title', s['subtitle']]
         if s.get('category') is not None:
@@ -1023,6 +1051,8 @@ class MP4Metadata:
             args += ['--disk', disk, '--TVSeasonNum', s['season']]
         if s.get('rating') is not None and self._rating_ok:
             args += ['--contentRating', s['rating']]
+        if s.get('tagline') is not None:
+            args += ['--comment', s['tagline']]
         self._perform(args)
     
     def _longer_tags(self):
@@ -1031,7 +1061,9 @@ class MP4Metadata:
         s = self.source
         args = []
         if s.get('description') is not None:
-            args += ['--description', s['description']]
+            args += ['--description', s['description'][:255]]
+            if len(s.get('description')) > 255:
+                args += ['--longdesc', s['description']]
         self._perform(args)
         if s.get('albumart') is not None:
             try:
@@ -1636,6 +1668,7 @@ class MKVTranscoder(Transcoder):
 class Source(dict):
     '''Acts as a base class for various raw video sources and handles
     Tvdb metadata.'''
+    api_key = 'df4ac82a200af402cd0b7f44cac82a51'
     fps = None
     resolution = None
     duration = None
@@ -1658,8 +1691,15 @@ class Source(dict):
         prodcode = self.get('syndicatedepisodenumber', '(?)')
         show = self.get('title')
         name = self.get('subtitle')
+        movie = self.get('movie')
+        airdate = self.get('originalairdate')
         s = ''
-        if show and name:
+        if movie and show:
+            if airdate:
+                s = u'%s (%d)' % (show, airdate.year)
+            else:
+                s = show
+        elif show and name:
             if season > 0 and episode > 0:
                 s = u'%s %02dx%02d - %s' % (show, season, episode, name)
             else:
@@ -1668,8 +1708,9 @@ class Source(dict):
             s = self.base
         return u'<Source \'%s\' at %s>' % (s, hex(id(self)))
     
-    def __init__(self, opts):
+    def __init__(self, opts, defaults):
         self.opts = opts
+        self.defaults = defaults
         if opts.tmp:
             self.remove_tmp = False
         else:
@@ -1686,6 +1727,8 @@ class Source(dict):
             else:
                 self.ext = 'mkv'
         self.tvdb = MythTV.ttvdb.tvdb_api.Tvdb(language = self.opts.language)
+        ln = _iso_639_2(self.opts.language)
+        self.tmdb = MythTV.tmdb.tmdb_api.MovieDb(self.api_key, language = ln)
     
     def _check_split_args(self):
         '''Determines the arguments to pass to FFmpeg when copying video data
@@ -1796,7 +1839,16 @@ class Source(dict):
             return ep
         lg = math.log(self['episodecount']) / math.log(10)
         field = int(math.ceil(lg))
+        if field < 2:
+            field = 2
         return ('%0' + str(field) + 'd') % ep
+    
+    def _collapse_movie(self):
+        '''If the source video is a movie, rather than a TV show,
+        applies the options for the movie subgroup to global options.'''
+        if self.get('movie') is True:
+            for key, val in self.defaults['.movie'].iteritems():
+                setattr(self.opts, key, val)
     
     def _find_episode(self, show):
         'Searches Tvdb for the episode using the original air date and title.'
@@ -1821,7 +1873,7 @@ class Source(dict):
                 return ep
         return None
     
-    def fetch_tvdb(self):
+    def _fetch_tvdb(self):
         'Obtains missing metadata through Tvdb if episode is found.'
         if not self.get('title'):
             return
@@ -1853,13 +1905,13 @@ class Source(dict):
                 if self.get('description') is None:
                     self['description'] = overview
                 elif overview is not None:
-                    if self.opts.use_tvdb_descriptions:
+                    if self.opts.use_db_descriptions:
                         if len(self['description']) < len(overview):
                             self['description'] = overview
                 rating = ep.get('rating')
                 if rating is not None:
                     self['popularity'] = int(float(rating) / 10 * 255)
-                    if self.opts.use_tvdb_rating:
+                    if self.opts.use_db_rating:
                         self['description'] += ' (%s / 10)' % rating
                 filename = ep.get('filename')
                 if filename is not None and len(filename) > 0:
@@ -1873,6 +1925,84 @@ class Source(dict):
                                         'episode screenshot ***')
         except MythTV.ttvdb.tvdb_exceptions.tvdb_shownotfound:
             logging.warning('*** Unable to fetch Tvdb listings for show ***')
+    
+    def _check_credits(self, person, role):
+        '''Determines whether a given credited role is not already present
+        within the credits tuple.'''
+        for item in self['credits']:
+            if person == item[0] and role == item[1]:
+                return False
+        return True
+    
+    def _add_tmdb_credits(self, movie):
+        'Adds any cast members listed by TMDb if not already known.'
+        tags = {'screenplay' : 'screenwriter', 'studios' : 'studio',
+                'producer' : 'producer', 'writer' : 'writer',
+                'editor' : 'editor', 'director' : 'director',
+                'actor' : 'actor'}
+        if self.get('credits') is None:
+            self['credits'] = []
+        for tag, role in tags.iteritems():
+            cast = movie.get(tag)
+            if cast is not None:
+                cast = cast.split(',')
+                for person in cast:
+                    if self._check_credits(person, role):
+                        self['credits'].append((person, role))
+    
+    def _fetch_tmdb(self):
+        'Obtains missing movie metadata through TMDb.'
+        if not self.get('title'):
+            return
+        try:
+            movie = self.tmdb.searchTitle(self.get('title'))[0]
+            movie = self.tmdb.searchTMDB(str(movie.get('id')))
+            airdate = self.get('originalairdate')
+            if airdate is None or airdate.year < 1900:
+                date = movie.get('released')
+                if date is not None:
+                    date = datetime.datetime.strptime(date, '%Y-%m-%d').date()
+                    self['originalairdate'] = date
+            overview = movie.get('overview')
+            if self.get('description') is None:
+                self['description'] = overview
+            elif overview is not None:
+                if self.opts.use_db_descriptions:
+                    if len(self['description']) < len(overview):
+                        self['description'] = overview
+            rating = movie.get('rating')
+            if rating is not None:
+                self['popularity'] = int(float(rating) / 10 * 255)
+                if self.opts.use_db_rating:
+                    self['description'] += ' (%s / 10)' % rating
+            rating = self.get('rating')
+            if rating is None or rating[:1] == '*':
+                self['rating'] = movie.get('certification')
+            if self.get('category') is None:
+                genres = movie.get('categories')
+                if genres is not None:
+                    self['category'] = genres.split(',')[0]
+            self['tagline'] = movie.get('tagline')
+            poster = movie.get('poster')
+            if poster is not None and len(poster) > 0:
+                poster = poster.split(',')[0]
+                ext = os.path.splitext(poster)[-1]
+                art = self.base + ext
+                try:
+                    urllib.urlretrieve(poster, art)
+                    self['albumart'] = art
+                except IOError:
+                    logging.warning('*** Unable to download movie poster ***')
+            self._add_tmdb_credits(movie)
+        except MythTV.tmdb.tmdb_exceptions.TmdbMovieOrPersonNotFound:
+            logging.warning('*** Unable to fetch Tmdb listings for movie ***')
+    
+    def fetch_database(self):
+        'Obtains missing metadata from either Tvdb or TMDb.'
+        if self.get('movie') == True:
+            self._fetch_tmdb()
+        else:
+            self._fetch_tvdb()
     
     def sort_credits(self):
         '''Sorts the list of credited actors, directors and such using the
@@ -2026,7 +2156,7 @@ class MythSource(Source):
         _table = 'recordedrating'
         _ref = ['chanid', 'starttime']
     
-    def __init__(self, jobid, opts):
+    def __init__(self, jobid, opts, defaults):
         self._get_db(opts)
         try:
             self.job = MythTV.Job(jobid, db = self.db)
@@ -2034,10 +2164,10 @@ class MythSource(Source):
             raise ValueError('Could not find job ID %d.' % jobid)
         channel = int(self.job.chanid)
         time = long(self.job.starttime.strftime('%Y%m%d%H%M%S'))
-        self.__init__(channel, time, opts)
+        self.__init__(channel, time, opts, defaults)
     
-    def __init__(self, channel, time, opts):
-        Source.__init__(self, opts)
+    def __init__(self, channel, time, opts, defaults):
+        Source.__init__(self, opts, defaults)
         self.chanid = channel
         self.channel = channel
         self.time = _convert_time(time)
@@ -2124,8 +2254,9 @@ class MythSource(Source):
                 cred = []
             cred.append((person['name'], person['role']))
         self['credits'] = cred
+        self._collapse_movie()
+        self.fetch_database()
         self.sort_credits()
-        self.fetch_tvdb()
     
     def copy(self):
         '''Copies the recording for the given channel ID and start time to the
@@ -2180,7 +2311,7 @@ class MythSource(Source):
                     dest.write(data)
                     data = source.read(bs)
         self._clean_cutlist()
-        if self.opts.use_tvdb_rating and self.get('popularity') is not None:
+        if self.opts.use_db_rating and self.get('popularity') is not None:
             self.rec.stars = round(self.get('popularity') / 51.0 * 2) / 10.0
         self.rec.filesize = long(os.path.getsize(self.final_file))
         self.rec.transcoded = 1
@@ -2201,8 +2332,8 @@ class WTVSource(Source):
     time = None
     orig = None
     
-    def __init__(self, wtv, opts):
-        Source.__init__(self, opts)
+    def __init__(self, wtv, opts, defaults):
+        Source.__init__(self, opts, defaults)
         self.wtv = wtv
         match = re.search('[^_]*_([^_]*)_(\d\d\d\d)_(\d\d)_(\d\d)_' +
                           '(\d\d)_(\d\d)_(\d\d)\.[Ww][Tt][Vv]', wtv)
@@ -2234,8 +2365,8 @@ class WTVSource(Source):
                 for line in text:
                     match = re.search(framesRE, line)
                     if match:
-                        start = int(match.group(1)) / self.fps
-                        end = int(match.group(2)) / self.fps
+                        start = int(match.group(1)) / 29.97 # self.fps
+                        end = int(match.group(2)) / 29.97 # self.fps
                         self.cutlist.append((start, end))
     
     def _parse_genre(self, genre):
@@ -2246,7 +2377,8 @@ class WTVSource(Source):
         'Translates the UTC timecode for original airdate into a date object.'
         try:
             d = datetime.datetime.strptime(airdate, '%Y-%m-%dT%H:%M:%SZ')
-            self['originalairdate'] = d.date()
+            if d.year >= 1900:
+                self['originalairdate'] = d.date()
         except ValueError:
             pass
     
@@ -2254,6 +2386,9 @@ class WTVSource(Source):
         'Translates the WTV credits line into a list of credited people.'
         cred = None
         people = line.split(';')
+        if len(people) != 4:
+            self['credits'] = []
+            return
         for tup in zip(range(0, 4), ['actor', 'director',
                                      'host', 'guest_star']):
             for person in people[tup[0]].split('/'):
@@ -2262,6 +2397,11 @@ class WTVSource(Source):
                         cred = []
                     cred.append((person, tup[1]))
         self['credits'] = cred
+    
+    def _parse_movie(self, line):
+        '''Determines whether or not the WTV recording is of a feature-length
+        movie.'''
+        self['movie'] = (line.lower() == 'true')
     
     def _fetch_metadata(self):
         'Obtains any metadata which might be embedded in the WTV.'
@@ -2279,6 +2419,7 @@ class WTVSource(Source):
                      self._parse_airdate))
         tags.append((re.compile('WM/ParentalRating' + val), 'rating'))
         tags.append((re.compile('WM/MediaCredits' + val), self._parse_credits))
+        tags.append((re.compile('WM/MediaIsMovie' + val), self._parse_movie))
         try:
             proc = subprocess.Popen(['ffmpeg', '-i', self.wtv],
                                     stdout = subprocess.PIPE,
@@ -2295,8 +2436,9 @@ class WTVSource(Source):
             proc.wait()
         except OSError:
             raise RuntimeError('FFmpeg is not installed.')
+        self._collapse_movie()
+        self.fetch_database()
         self.sort_credits()
-        self.fetch_tvdb()
     
     def copy(self):
         'Extracts the MPEG-2 data from the WTV file.'
@@ -2307,7 +2449,7 @@ class WTVSource(Source):
                   _iso_639_2(self.opts.language)])
         except RuntimeError:
             raise RuntimeError('Could not extract video.')
-        self._fetch_metadata()
+        #self._fetch_metadata()
         (self.fps, self.resolution, self.duration,
          self.vstreams, self.astreams) = self.video_params()
         if not self.fps or not self.resolution or not self.duration:
@@ -2326,14 +2468,14 @@ if __name__ == '__main__':
     if len(args) == 1:
         if args[0].isdigit():
             jobid = int(args[0])
-            s = MythSource(jobid, opts)
+            s = MythSource(jobid, opts, defaults)
         else:
             wtv = args[0]
-            s = WTVSource(wtv, opts)
+            s = WTVSource(wtv, opts, defaults)
     else:
         channel = int(args[0])
         timecode = long(args[1])
-        s = MythSource(channel, timecode, opts)
+        s = MythSource(channel, timecode, opts, defaults)
     s.copy()
     s.print_metadata()
     s.print_options()
