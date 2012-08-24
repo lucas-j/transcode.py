@@ -2030,17 +2030,28 @@ class Source(dict):
             if tags.has_key(person.job):
                 self['credits'].append((person.name, tags[person.job]))
     
+    def _fetch_movie(self):
+        'Attempts to find the movie in TMDb.'
+        results = tmdb3.searchMovie(self.get('title'))
+        if len(results) == 0:
+            return None
+        airdate = self.get('originalairdate')
+        if airdate is not None and airdate.year > 1900:
+            for m in results:
+                if m.releasedate == airdate:
+                    return m
+        return results[0]
+    
     def _fetch_tmdb(self):
         'Obtains missing movie metadata through TMDb.'
         if not self.get('title'):
             return
         try:
-            results = tmdb3.searchMovie(self.get('title'))
-            if len(results) == 0:
+            movie = self._fetch_movie()
+            if movie is None:
                 logging.warning('*** Unable to fetch TMDb listings '
                                 'for movie ***')
                 return
-            movie = results[0]
             airdate = self.get('originalairdate')
             if airdate is None or airdate.year < 1900:
                 self['originalairdate'] = movie.releasedate
@@ -2567,31 +2578,43 @@ class MP4Source(Source):
         self.final_file = self.orig
         self._fetch_metadata()
     
+    def _check(self, test, title, thresh = 0):
+        'Determines whether a test string matches closely with the title.'
+        if thresh == 0:
+            thresh = max(int(round(len(title) * 0.25)), 3)
+        test = test.lower()
+        title = title.lower()
+        if len(title) > 8 and test.find(title) >= 0:
+            return True
+        if _levenshtein(title, test) < thresh:
+            return True
+        return False
+    
     def _check_movie(self, title, thresh = 0):
         '''Determines if a given title matches closely with the name of a
         movie in the TMDb database, within a given Levenshtein threshold.'''
-        if thresh == 0:
-            thresh = max(int(round(len(title) * 0.4)), 4)
         try:
-            movies = tmdb3.searchMovie(title)
+            if re.search('\((\d\d\d\d)\)', title):
+                movies = tmdb3.searchMovieWithYear(title)
+                title = re.sub('\(\d\d\d\d\)', '', title).strip()
+            else:
+                movies = tmdb3.searchMovie(title)
         except tmdb3.tmdb_exceptions.TMDBError:
             return None
         for m in movies:
             t = m.title
-            if _levenshtein(title, t) < thresh:
-                return t
+            if self._check(t, title, thresh):
+                return t, m
         return None
     
     def _check_show(self, title, thresh = 0):
         '''Determines if a given title matches closely with the name of a
         TV show in the Tvdb database, within a given Levenshtein threshold.'''
-        if thresh == 0:
-            thresh = max(int(round(len(title) * 0.4)), 4)
         try:
             show = self.tvdb[title].data.get('seriesname')
         except MythTV.ttvdb.tvdb_exceptions.tvdb_shownotfound:
             return None
-        if _levenshtein(title, show) < thresh:
+        if self._check(show, title, thresh):
             return show
         return None
     
@@ -2599,8 +2622,6 @@ class MP4Source(Source):
         '''Determines if a given title matches closely with the name of an
         episode of a TV show in the Tvdb database, within a given
         Levenshtein threshold.'''
-        if thresh == 0:
-            thresh = max(int(round(len(title) * 0.4)), 4)
         try:
             show = self.tvdb[show]
         except MythTV.ttvdb.tvdb_exceptions.tvdb_shownotfound:
@@ -2608,7 +2629,7 @@ class MP4Source(Source):
         eps = show.search(title, key = 'episodename')
         for ep in eps:
             name = ep['episodename']
-            if _levenshtein(title, name) < thresh:
+            if self._check(name, title):
                 return name
         return None
     
@@ -2623,7 +2644,8 @@ class MP4Source(Source):
         if movie is not None:
             self.meta_present = True
             self['movie'] = True
-            self['title'] = movie
+            self['title'] = movie[0]
+            self['originalairdate'] = movie[1].releasedate
         else:
             for t in titles:
                 show = self._check_show(t)
@@ -2658,7 +2680,6 @@ class MP4Source(Source):
         pass
 
 if __name__ == '__main__':
-    #sys.stdout = codecs.getwriter('utf8')(sys.stdout)
     defaults = _read_options()
     parser = _get_options(defaults)
     opts, args = parser.parse_args()
@@ -2669,7 +2690,7 @@ if __name__ == '__main__':
         if args[0].isdigit():
             jobid = int(args[0])
             s = MythSource(jobid, opts, defaults)
-        elif os.path.splitext(args[0])[1].lower() == 'wtv':
+        elif re.search('\.[Ww][Tt][Vv]', args[0]) is not None:
             wtv = args[0]
             s = WTVSource(wtv, opts, defaults)
         else:
