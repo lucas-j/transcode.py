@@ -119,12 +119,13 @@ Special thanks to:
 # - subtitle font is sometimes too large on QuickTime / iTunes / iPods
 # - many Matroska players seem to have trouble displaying metadata properly
 # - video_br and video_crf aren't recognized options in ffmpeg 0.7+
+# - AtomicParsley can crash on MPEG-4 files larger than 2 GB
 
 import re, os, sys, math, datetime, subprocess, urllib, tempfile, glob
 import shutil, codecs, StringIO, time, optparse, unicodedata, logging
 import xml.dom.minidom
 import MythTV, MythTV.ttvdb.tvdb_api, MythTV.ttvdb.tvdb_exceptions
-import MythTV.tmdb.tmdb_api, MythTV.tmdb.tmdb_exceptions
+import tmdb3.tmdb_api, tmdb3.tmdb_exceptions
 
 def _clean(filename):
     'Removes the file if it exists.'
@@ -402,11 +403,11 @@ def _find_conf_file():
 def _get_defaults():
     'Returns configuration defaults for this program.'
     opts = {'final_path' : '~/Videos', 'tmp' : None, 'format' : '%T/%T - %S',
-            'replace_char' : '', 'language' : 'en', 'host' : '127.0.0.1',
-            'database' : 'mythconverg', 'user' : 'mythtv',
-            'password' : 'mythtv', 'pin' : 0, 'import_mythtv' : False,
-            'container' : 'mp4', 'video' : None, 'audio' : None,
-            'ipod' : False, 'webm' : False, 'two_pass' : False,
+            'replace_char' : '', 'language' : 'en', 'country' : 'us',
+            'host' : '127.0.0.1', 'database' : 'mythconverg',
+            'user' : 'mythtv', 'password' : 'mythtv', 'pin' : 0,
+            'import_mythtv' : False, 'container' : 'mp4', 'video' : None,
+            'audio' : None, 'ipod' : False, 'webm' : False, 'two_pass' : False,
             'h264_rc' : None, 'vp8_rc' : 'vbr', 'video_br' : 1920,
             'video_crf' : 23, 'preset' : None, 'h264_speed' : 'slow',
             'vp8_speed' : '0', 'threads' : 0, 'resolution' : None,
@@ -528,6 +529,10 @@ def _get_options(opts):
     flopts.add_option('-l', '--lang', dest = 'language',
                       default = opts['language'], metavar = 'LANG',
                       help = 'two-letter language code [default: %default]')
+    flopts.add_option('--country', dest = 'country',
+                      default = opts['country'], metavar = 'COUNTRY',
+                      help = 'two-letter country code for TMDb ' +
+                      '[default: %default]')
     parser.add_option_group(flopts)
     myopts = optparse.OptionGroup(parser, 'MythTV options')
     myopts.add_option('--host', dest = 'host', metavar = 'IP',
@@ -957,9 +962,10 @@ class MP4Metadata:
     def _get_director(self):
         '''Browses through the credits tuple and returns the first credited
         director encountered.'''
-        for person in self.source.get('credits'):
-            if person[1] == 'director':
-                return person[0]
+        if self.source.get('credits') is not None:
+            for person in self.source.get('credits'):
+                if person[1] == 'director':
+                    return person[0]
         return None
     
     def _sort_credits(self):
@@ -1806,7 +1812,13 @@ class Source(dict):
                 self.ext = 'mkv'
         self.tvdb = MythTV.ttvdb.tvdb_api.Tvdb(language = self.opts.language)
         ln = _iso_639_2(self.opts.language)
-        self.tmdb = MythTV.tmdb.tmdb_api.MovieDb(self.api_key, language = ln)
+        cn = self.opts.country
+        if cn is not None:
+            cn = cn.upper()
+        cache = os.path.join(tempfile.gettempdir(), 'tmdb3.cache')
+        tmdb3.set_cache(engine = 'null')
+        tmdb3.set_key(self.api_key)
+        tmdb3.set_locale(language = ln, country = cn, fallthrough = 'en')
     
     def _check_split_args(self):
         '''Determines the arguments to pass to FFmpeg when copying video data
@@ -1990,7 +2002,8 @@ class Source(dict):
                 if rating is not None:
                     self['popularity'] = int(float(rating) / 10 * 255)
                     if self.opts.use_db_rating:
-                        self['description'] += ' (%s / 10)' % rating
+                        if self.get('description') is not None:
+                            self['description'] += ' (%s / 10)' % rating
                 filename = ep.get('filename')
                 if filename is not None and len(filename) > 0:
                     ext = os.path.splitext(filename)[-1]
@@ -2004,66 +2017,64 @@ class Source(dict):
         except MythTV.ttvdb.tvdb_exceptions.tvdb_shownotfound:
             logging.warning('*** Unable to fetch Tvdb listings for show ***')
     
-    def _check_credits(self, person, role):
-        '''Determines whether a given credited role is not already present
-        within the credits tuple.'''
-        for item in self['credits']:
-            if person == item[0] and role == item[1]:
-                return False
-        return True
-    
     def _add_tmdb_credits(self, movie):
         'Adds any cast members listed by TMDb if not already known.'
-        tags = {'screenplay' : 'screenwriter', 'studios' : 'studio',
-                'producer' : 'producer', 'writer' : 'writer',
-                'editor' : 'editor', 'director' : 'director',
-                'actor' : 'actor'}
-        if self.get('credits') is None:
-            self['credits'] = []
-        for tag, role in tags.iteritems():
-            cast = movie.get(tag)
-            if cast is not None:
-                cast = cast.split(',')
-                for person in cast:
-                    if self._check_credits(person, role):
-                        self['credits'].append((person, role))
+        tags = {'Screenplay' : 'screenwriter', 'Producer' : 'producer',
+                'Executive Producer' : 'executive_producer',
+                'Writer' : 'writer', 'Author' : 'writer', 'Editor' : 'editor',
+                'Director' : 'director'}
+        self['credits'] = []
+        for person in movie.cast:
+            self['credits'].append((person.name, 'actor'))
+        for person in movie.crew:
+            if tags.has_key(person.job):
+                self['credits'].append((person.name, tags[person.job]))
     
     def _fetch_tmdb(self):
         'Obtains missing movie metadata through TMDb.'
         if not self.get('title'):
             return
         try:
-            movie = self.tmdb.searchTitle(self.get('title'))[0]
-            movie = self.tmdb.searchTMDB(str(movie.get('id')))
+            results = tmdb3.searchMovie(self.get('title'))
+            if len(results) == 0:
+                logging.warning('*** Unable to fetch TMDb listings '
+                                'for movie ***')
+                return
+            movie = results[0]
             airdate = self.get('originalairdate')
             if airdate is None or airdate.year < 1900:
-                date = movie.get('released')
-                if date is not None:
-                    date = datetime.datetime.strptime(date, '%Y-%m-%d').date()
-                    self['originalairdate'] = date
-            overview = movie.get('overview')
+                self['originalairdate'] = movie.releasedate
+            overview = movie.overview
             if self.get('description') is None:
                 self['description'] = overview
             elif overview is not None:
                 if self.opts.use_db_descriptions:
                     if len(self['description']) < len(overview):
                         self['description'] = overview
-            rating = movie.get('rating')
+            rating = movie.userrating
             if rating is not None:
                 self['popularity'] = int(float(rating) / 10 * 255)
                 if self.opts.use_db_rating:
-                    self['description'] += ' (%s / 10)' % rating
-            rating = self.get('rating')
-            if rating is None or rating[:1] == '*':
-                self['rating'] = movie.get('certification')
+                    if self.get('description') is not None:
+                        self['description'] += ' (%s / 10)' % rating
+            cn = self.opts.country
+            if cn is None or not movie.releases.has_key(cn.upper()):
+                cn = 'US'
+            else:
+                cn = cn.upper()
+            if movie.releases.has_key(cn):
+                certification = movie.releases[cn].certification
+                rating = self.get('rating')
+                if rating is None or rating[:1] == '*':
+                    self['rating'] = certification
             if self.get('category') is None:
-                genres = movie.get('categories')
-                if genres is not None:
-                    self['category'] = genres.split(',')[0]
-            self['tagline'] = movie.get('tagline')
-            poster = movie.get('poster')
-            if poster is not None and len(poster) > 0:
-                poster = poster.split(',')[0]
+                genres = movie.genres
+                if genres is not None and len(genres) > 0:
+                    self['category'] = genres[0].name
+            self['tagline'] = movie.tagline
+            poster = movie.poster
+            if poster is not None:
+                poster = poster.geturl()
                 ext = os.path.splitext(poster)[-1]
                 art = self.base + ext
                 try:
@@ -2072,8 +2083,8 @@ class Source(dict):
                 except IOError:
                     logging.warning('*** Unable to download movie poster ***')
             self._add_tmdb_credits(movie)
-        except MythTV.tmdb.tmdb_exceptions.TmdbMovieOrPersonNotFound:
-            logging.warning('*** Unable to fetch Tmdb listings for movie ***')
+        except tmdb3.tmdb_exceptions.TMDBError:
+            logging.warning('*** Unable to fetch TMDb listings for movie ***')
     
     def fetch_database(self):
         'Obtains missing metadata from either Tvdb or TMDb.'
@@ -2556,35 +2567,35 @@ class MP4Source(Source):
         self.final_file = self.orig
         self._fetch_metadata()
     
-    def _find_movie(self, title, thresh = 0):
+    def _check_movie(self, title, thresh = 0):
         '''Determines if a given title matches closely with the name of a
         movie in the TMDb database, within a given Levenshtein threshold.'''
         if thresh == 0:
             thresh = max(int(round(len(title) * 0.4)), 4)
         try:
-            movies = self.tmdb.searchTitle(title)
-        except MythTV.tmdb.tmdb_exceptions.TmdbMovieOrPersonNotFound:
+            movies = tmdb3.searchMovie(title)
+        except tmdb3.tmdb_exceptions.TMDBError:
             return None
         for m in movies:
-            t = m['name']
+            t = m.title
             if _levenshtein(title, t) < thresh:
                 return t
         return None
     
-    def _find_show(self, title, thresh = 0):
+    def _check_show(self, title, thresh = 0):
         '''Determines if a given title matches closely with the name of a
         TV show in the Tvdb database, within a given Levenshtein threshold.'''
         if thresh == 0:
             thresh = max(int(round(len(title) * 0.4)), 4)
         try:
-            show = self.tvdb[title]
+            show = self.tvdb[title].data.get('seriesname')
         except MythTV.ttvdb.tvdb_exceptions.tvdb_shownotfound:
             return None
         if _levenshtein(title, show) < thresh:
             return show
         return None
     
-    def _find_episode(self, show, title, thresh = 0):
+    def _check_episode(self, show, title, thresh = 0):
         '''Determines if a given title matches closely with the name of an
         episode of a TV show in the Tvdb database, within a given
         Levenshtein threshold.'''
@@ -2608,14 +2619,14 @@ class MP4Source(Source):
         path, second_dir = os.path.split(path)
         titles = [x.strip() for x in title.split('-')]
         titles += [first_dir, second_dir]
-        movie = self._find_movie(title)
+        movie = self._check_movie(title)
         if movie is not None:
             self.meta_present = True
             self['movie'] = True
             self['title'] = movie
         else:
             for t in titles:
-                show = self._find_show(t)
+                show = self._check_show(t)
                 if show is not None:
                     self.meta_present = True
                     self['movie'] = False
@@ -2623,8 +2634,9 @@ class MP4Source(Source):
                     break
             if not self.meta_present:
                 raise ValueError('Could not find match for %s.' % title)
+            titles += title
             for t in titles:
-                ep = self._find_episode(show, t)
+                ep = self._check_episode(show, t)
                 if ep is not None:
                     self['subtitle'] = ep
             if self.get('subtitle') is None:
