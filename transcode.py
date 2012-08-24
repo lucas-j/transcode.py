@@ -128,6 +128,8 @@ import MythTV.tmdb.tmdb_api, MythTV.tmdb.tmdb_exceptions
 
 def _clean(filename):
     'Removes the file if it exists.'
+    if filename is None or filename == '':
+        return
     try:
         os.remove(filename)
     except OSError:
@@ -179,6 +181,24 @@ def _seconds_to_time_frac(sec, comma = False):
         return '%02d:%02d:%02d,%03d' % (hours, minutes, sec, frac)
     else:
         return '%02d:%02d:%07.4f' % (hours, minutes, sec)
+
+def _levenshtein(lhs, rhs):
+    '''Computes the Levenbshtein distance between two strings, as discussed
+    and implemented in http://en.wikipedia.org/wiki/Levenshtein_distance'''
+    xlen = len(lhs) + 1
+    ylen = len(rhs) + 1
+    arr = [[0 for col in xrange(0, xlen)] for row in xrange(0, ylen)]
+    for y in xrange(0, ylen):
+        arr[y][0] = y
+    for x in xrange(0, xlen):
+        arr[0][x] = x
+    for y in xrange(1, ylen):
+        for x in xrange(1, xlen):
+            dist = arr[y - 1][x - 1]
+            if lhs[x - 1] != rhs[y - 1]:
+                dist = min(arr[y - 1][x], arr[y][x - 1], arr[y - 1][x - 1]) + 1
+            arr[y][x] = dist
+    return arr[ylen - 1][xlen - 1]
 
 def _last_name_first(name):
     '''Reverses the order of full names of people, so their last name
@@ -693,8 +713,11 @@ def _check_args(args, parser, opts):
         if not os.path.exists(args[0]):
             print 'Error: file not found.'
             exit(1)
-        if not re.search('\.[Ww][Tt][Vv]', args[0]):
-            print 'Error: file is not a WTV recording.'
+        wtv = re.search('\.[Ww][Tt][Vv]', args[0])
+        mp4 = re.search('\.[Mm][Pp]4', args[0])
+        m4v = re.search('\.[Mm]4[Vv]', args[0])
+        if not (wtv or mp4 or m4v):
+            print 'Error: file is not a WTV recording or an MPEG-4 video file.'
             exit(1)
     else:
         parser.print_help()
@@ -1026,7 +1049,7 @@ class MP4Metadata:
             args = ['--stik', 'TV Show', '--encodingTool', version]
         if type(s) == WTVSource:
             args += ['--grouping', 'Windows Media Center Recording']
-        else:
+        elif type(s) == MythSource:
             args += ['--grouping', 'MythTV Recording']
         if s.get('time') is not None:
             utc = s.time.strftime('%Y-%m-%dT%H:%M:%SZ')
@@ -1675,6 +1698,51 @@ class MKVTranscoder(Transcoder):
         self.chapters.clean_tmp()
         self.metadata.clean_tmp()
 
+class NullTranscoder(Transcoder):
+    '''Does not actually perform any transcoding operations. Used to tag
+    MPEG-4 video files which have already been transcoded.'''
+    
+    def __init__(self, source, opts):
+        self.source = source
+        self.opts = opts
+        self._join = ''
+        self._demux = ''
+        self._wav = ''
+        self.video = ''
+        self.audio = ''
+        self.subtitles = None
+        self.chapters = None
+        self.metadata = MP4Metadata(source)
+        self.check()
+    
+    def check(self):
+        'Checks if metadata tagging tools are installed.'
+        if not self.metadata.enabled:
+            raise RuntimeError('AtomicParsley is not installed.')
+    
+    def split(self):
+        pass
+    
+    def join(self):
+        pass
+    
+    def demux(self):
+        pass
+    
+    def encode_video(self):
+        pass
+    
+    def encode_audio(self):
+        pass
+    
+    def remux(self):
+        'Embeds metadata using AtomicParsley.'
+        self.metadata.write(_version(self.opts))
+    
+    def clean_tmp(self):
+        'Removes any temporary files generated during encoding.'
+        self.metadata.clean_tmp()
+
 class Source(dict):
     '''Acts as a base class for various raw video sources and handles
     Tvdb metadata.'''
@@ -2068,7 +2136,8 @@ class Source(dict):
                 audio += ' (libfaac)'
             elif self.opts.aac_encoder == 'ffmpeg-aac':
                 audio += ' (ffmpeg-aac)'
-        logging.info('  Format: %s, %s, %s' % (fmt, video, audio))
+        if type(self) != MP4Source:
+            logging.info('  Format: %s, %s, %s' % (fmt, video, audio))
         enc = '  Video options:'
         if self.opts.preset:
             enc += ' preset \'%s\',' % self.opts.preset
@@ -2092,7 +2161,8 @@ class Source(dict):
             enc += ' two-pass'
         else:
             enc += ' one-pass'
-        logging.info(enc)
+        if type(self) != MP4Source:
+            logging.info(enc)
         logging.info('  Source file: %s' % self.orig)
         logging.info('  Target file: %s' % self.final_file)
         logging.info('  Temporary directory: %s' % self.opts.tmp)
@@ -2467,8 +2537,116 @@ class WTVSource(Source):
         self.opts.resolution = self.parse_resolution(self.opts.resolution)
         self._cut_list()
 
+class MP4Source(Source):
+    'Fetches Tvdb / TMDb metadata for an existing MPEG-4 video file.'
+    channel = None
+    
+    def __init__(self, mp4, opts, defaults):
+        Source.__init__(self, opts, defaults)
+        if not os.path.exists(mp4):
+            raise ValueError('Could not find file %s.' % mp4)
+        self.ext = os.path.splitext(mp4)[-1]
+        if self.ext[0] == '.':
+            self.ext = self.ext[1:]
+        b = os.path.basename(os.path.splitext(mp4)[0])
+        self.base = os.path.join(opts.tmp, b)
+        self.time = datetime.datetime.fromtimestamp(os.stat(mp4).st_ctime)
+        self.orig = os.path.abspath(mp4)
+        self.final = os.path.splitext(self.orig)[0]
+        self.final_file = self.orig
+        self._fetch_metadata()
+    
+    def _find_movie(self, title, thresh = 0):
+        '''Determines if a given title matches closely with the name of a
+        movie in the TMDb database, within a given Levenshtein threshold.'''
+        if thresh == 0:
+            thresh = max(int(round(len(title) * 0.4)), 4)
+        try:
+            movies = self.tmdb.searchTitle(title)
+        except MythTV.tmdb.tmdb_exceptions.TmdbMovieOrPersonNotFound:
+            return None
+        for m in movies:
+            t = m['name']
+            if _levenshtein(title, t) < thresh:
+                return t
+        return None
+    
+    def _find_show(self, title, thresh = 0):
+        '''Determines if a given title matches closely with the name of a
+        TV show in the Tvdb database, within a given Levenshtein threshold.'''
+        if thresh == 0:
+            thresh = max(int(round(len(title) * 0.4)), 4)
+        try:
+            show = self.tvdb[title]
+        except MythTV.ttvdb.tvdb_exceptions.tvdb_shownotfound:
+            return None
+        if _levenshtein(title, show) < thresh:
+            return show
+        return None
+    
+    def _find_episode(self, show, title, thresh = 0):
+        '''Determines if a given title matches closely with the name of an
+        episode of a TV show in the Tvdb database, within a given
+        Levenshtein threshold.'''
+        if thresh == 0:
+            thresh = max(int(round(len(title) * 0.4)), 4)
+        try:
+            show = self.tvdb[show]
+        except MythTV.ttvdb.tvdb_exceptions.tvdb_shownotfound:
+            return None
+        eps = show.search(title, key = 'episodename')
+        for ep in eps:
+            name = ep['episodename']
+            if _levenshtein(title, name) < thresh:
+                return name
+        return None
+    
+    def _fetch_metadata(self):
+        'Searches for the filename on Tvdb / TMDb.'
+        path, title = os.path.split(os.path.splitext(self.orig)[0])
+        path, first_dir = os.path.split(path)
+        path, second_dir = os.path.split(path)
+        titles = [x.strip() for x in title.split('-')]
+        titles += [first_dir, second_dir]
+        movie = self._find_movie(title)
+        if movie is not None:
+            self.meta_present = True
+            self['movie'] = True
+            self['title'] = movie
+        else:
+            for t in titles:
+                show = self._find_show(t)
+                if show is not None:
+                    self.meta_present = True
+                    self['movie'] = False
+                    self['title'] = show
+                    break
+            if not self.meta_present:
+                raise ValueError('Could not find match for %s.' % title)
+            for t in titles:
+                ep = self._find_episode(show, t)
+                if ep is not None:
+                    self['subtitle'] = ep
+            if self.get('subtitle') is None:
+                raise ValueError('Could not find episode for %s.' % title)
+        self._collapse_movie()
+        self.fetch_database()
+        self.sort_credits()
+    
+    def copy(self):
+        'Sets all video parameters to null, as they are not necessary.'
+        self.fps = 0
+        self.resolution = (0, 0)
+        self.duration = 0
+        self.vstreams = 0
+        self.astreams = 0
+        self.opts.resolution = self.resolution
+    
+    def clean_copy(self):
+        pass
+
 if __name__ == '__main__':
-    sys.stdout = codecs.getwriter('utf8')(sys.stdout)
+    #sys.stdout = codecs.getwriter('utf8')(sys.stdout)
     defaults = _read_options()
     parser = _get_options(defaults)
     opts, args = parser.parse_args()
@@ -2479,9 +2657,11 @@ if __name__ == '__main__':
         if args[0].isdigit():
             jobid = int(args[0])
             s = MythSource(jobid, opts, defaults)
-        else:
+        elif os.path.splitext(args[0])[1].lower() == 'wtv':
             wtv = args[0]
             s = WTVSource(wtv, opts, defaults)
+        else:
+            s = MP4Source(args[0], opts, defaults)
     else:
         channel = int(args[0])
         timecode = long(args[1])
@@ -2489,7 +2669,9 @@ if __name__ == '__main__':
     s.copy()
     s.print_metadata()
     s.print_options()
-    if opts.container == 'mkv':
+    if type(s) == MP4Source:
+        t = NullTranscoder(s, opts)
+    elif opts.container == 'mkv':
         t = MKVTranscoder(s, opts)
     else:
         t = MP4Transcoder(s, opts)
