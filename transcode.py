@@ -89,7 +89,8 @@ Special thanks to:
 # 2) symlink / MythVideo integration
 # 3) MythLog / error handling
 # 4) better job handling
-# 5) Tmdb integration for movies
+# 5) Tmdb integration for movies (done)
+# 6) deinterlace / auto-crop filter
 
 # Changelog:
 # 1.3 - support for Matroska / VP8, fixed subtitle sync problems
@@ -120,6 +121,7 @@ Special thanks to:
 # - many Matroska players seem to have trouble displaying metadata properly
 # - video_br and video_crf aren't recognized options in ffmpeg 0.7+
 # - AtomicParsley can crash on MPEG-4 files larger than 2 GB
+# - No Unicode support for AtomicParsley on Windows (Python bug)
 
 import re, os, sys, math, datetime, subprocess, urllib, tempfile, glob
 import shutil, codecs, StringIO, time, optparse, unicodedata, logging
@@ -721,8 +723,9 @@ def _check_args(args, parser, opts):
         wtv = re.search('\.[Ww][Tt][Vv]', args[0])
         mp4 = re.search('\.[Mm][Pp]4', args[0])
         m4v = re.search('\.[Mm]4[Vv]', args[0])
-        if not (wtv or mp4 or m4v):
-            print 'Error: file is not a WTV recording or an MPEG-4 video file.'
+        mkv = re.search('\.[Mm][Kk][Vv]', args[0])
+        if not (wtv or mp4 or m4v or mkv):
+            print 'Error: file is not a WTV recording or a valid video file.'
             exit(1)
     else:
         parser.print_help()
@@ -1204,7 +1207,7 @@ class MKVMetadata:
                              self.source.get('episodecount'))
         tags = {'subtitle' : 'subtitle', 'episode' : 'part_number',
                 'syndicatedepisodenumber' : 'catalog_number',
-                'channel' : 'distributed_by', 'description' : 'description',
+                'channel' : 'distributed_by', 'description' : 'summary',
                 'rating' : 'law_rating'}
         for key, val in tags.iteritems():
             if self.source.get(key) is not None:
@@ -1219,7 +1222,8 @@ class MKVMetadata:
         self._add_simple(self._ep, 'date_encoded', utc)
         self._add_simple(self._ep, 'date_tagged', utc)
         self._add_simple(self._ep, 'encoder', version)
-        self._add_simple(self._ep, 'fps', self.source.fps)
+        if self.source.fps > 0:
+            self._add_simple(self._ep, 'fps', self.source.fps)
     
     def _credits(self):
         'Adds a list of credited people into the XML tree.'
@@ -1234,6 +1238,8 @@ class MKVMetadata:
                 self._add_simple(self._ep, 'producer', person[0])
             elif person[1] == 'writer':
                 self._add_simple(self._ep, 'written_by', person[0])
+            elif person[1] == 'screenwriter':
+                self._add_simple(self._ep, 'screenplay_by', person[0])
     
     def write(self, version):
         '''Writes the metadata XML file and returns command-line arguments to
@@ -1253,7 +1259,10 @@ class MKVMetadata:
             dest.write(data)
         args = ['--global-tags', self._tags]
         if self.source.get('albumart') is not None:
-            args += ['--attachment-description', 'Episode preview']
+            if self.source.get('movie'):
+                args += ['--attachment-description', 'Movie poster']
+            else:
+                args += ['--attachment-description', 'Episode preview']
             args += ['--attachment-mime-type', 'image/jpeg']
             args += ['--attach-file', self.source.get('albumart')]
         return args
@@ -2467,8 +2476,8 @@ class WTVSource(Source):
                 for line in text:
                     match = re.search(framesRE, line)
                     if match:
-                        start = int(match.group(1)) / 29.97 # self.fps
-                        end = int(match.group(2)) / 29.97 # self.fps
+                        start = int(match.group(1)) / 29.97
+                        end = int(match.group(2)) / 29.97
                         self.cutlist.append((start, end))
     
     def _parse_genre(self, genre):
@@ -2551,7 +2560,6 @@ class WTVSource(Source):
                   _iso_639_2(self.opts.language)])
         except RuntimeError:
             raise RuntimeError('Could not extract video.')
-        #self._fetch_metadata()
         (self.fps, self.resolution, self.duration,
          self.vstreams, self.astreams) = self.video_params()
         if not self.fps or not self.resolution or not self.duration:
@@ -2661,6 +2669,7 @@ class MP4Source(Source):
                 ep = self._check_episode(show, t)
                 if ep is not None:
                     self['subtitle'] = ep
+                    break
             if self.get('subtitle') is None:
                 raise ValueError('Could not find episode for %s.' % title)
         self._collapse_movie()
