@@ -2041,7 +2041,11 @@ class Source(dict):
     
     def _fetch_movie(self):
         'Attempts to find the movie in TMDb.'
-        results = tmdb3.searchMovie(self.get('title'))
+        title = re.sub('-', '\\-', self.get('title'))
+        if type(title) is unicode:
+            title = title.encode('utf_8')
+        print title
+        results = tmdb3.searchMovie(title)
         if len(results) == 0:
             return None
         airdate = self.get('originalairdate')
@@ -2568,7 +2572,8 @@ class WTVSource(Source):
         self._cut_list()
 
 class MP4Source(Source):
-    'Fetches Tvdb / TMDb metadata for an existing MPEG-4 video file.'
+    '''Fetches Tvdb / TMDb metadata for an existing MPEG-4 or Matroska
+    video file.'''
     channel = None
     
     def __init__(self, mp4, opts, defaults):
@@ -2601,6 +2606,7 @@ class MP4Source(Source):
     def _check_movie(self, title, thresh = 0):
         '''Determines if a given title matches closely with the name of a
         movie in the TMDb database, within a given Levenshtein threshold.'''
+        title = re.sub('-', '\\-', title)
         try:
             if re.search('\((\d\d\d\d)\)', title):
                 movies = tmdb3.searchMovieWithYear(title)
