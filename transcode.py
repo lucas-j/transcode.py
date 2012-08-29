@@ -8,6 +8,8 @@ or VP8/Vorbis/FLAC codecs, cutting the video at certain commercial points
 detected by either MythTV or by Comskip. The resulting video file comes
 complete with SRT subtitles extracted from the embedded VBI closed-caption
 data. and iTunes-compatible metadata about the episode, if it can be found.
+Optionally, existing MPEG-4 or Matroska video with proper filenames can be
+tagged with metadata obtained from open movie / TV databases.
 
 In short, this program calls a bunch of programs to convert a file like
 1041_20100523000000.mpg or Program Name_ABC_2010_05_23_00_00_00.wtv into a
@@ -26,6 +28,7 @@ Requirements:
 - Python 2.7 (http://www.python.org)
   - lxml (http://lxml.de)
   - mysql-python (http://sourceforge.net/projects/mysql-python)
+  - Tmdb3 (https://github.com/wagnerrp/pytmdb3)
   - the MythTV Python bindings (if MythTV is not installed already)
 
 For MPEG-4 / H.264:
@@ -58,6 +61,7 @@ Setup:
 Usage:
   transcode.py %CHANID% %STARTTIME%
   transcode.py /path/to/file.wtv
+  transcode.py /path/to/file.m4v
 See transcode.py --help for more details
 
 Notes on format string:
@@ -84,15 +88,8 @@ Special thanks to:
 - Project-X team
 '''
 
-# todo -
-# 1) simplify encode option parsing (done)
-# 2) symlink / MythVideo integration
-# 3) MythLog / error handling
-# 4) better job handling
-# 5) Tmdb integration for movies (done)
-# 6) deinterlace / auto-crop filter
-
 # Changelog:
+# 1.4 - added TMDb support, deinterlace / auto-crop filter, direct tagging
 # 1.3 - support for Matroska / VP8, fixed subtitle sync problems
 # 1.2 - better accuracy for commercial clipping, easier configuration
 # 1.1 - support for multiple audio streams, Comskip
@@ -102,26 +99,26 @@ Special thanks to:
 # - better error handling
 # - check for adequate disk space on temporary directory and destination
 # - generate thumbnail if necessary
-# - better genre interpretation for WTV files
-# - fetch metadata for movies as well as TV episodes
+# - better genre interpretation for WTV files / TMDb movies
 # - allow users to manually enter in metadata if none can be found
+# - interactive menu option to resolve ambiguous metadata
+# - split transcode.py into several individual modules
+# - MythVideo integration
+# - better MythTV job integration
 
 # Long-term goals:
-# - add entries to MythTV's database when encoding is finished
 # - support for boxed-set TV seasons on DVD
 # - metadata / chapter support for as many different players as possible,
 #   especially Windows Media Player
 # - easier installation: all required programs should be bundled
 # - Python 3.x compatibility
-# - apply video filters, such as deinterlace, crop detection, etc.
 # - a separate program for viewing / editing Comskip data
 
 # Known issues:
 # - subtitle font is sometimes too large on QuickTime / iTunes / iPods
 # - many Matroska players seem to have trouble displaying metadata properly
-# - video_br and video_crf aren't recognized options in ffmpeg 0.7+
 # - AtomicParsley can crash on MPEG-4 files larger than 2 GB
-# - No Unicode support for AtomicParsley on Windows (Python bug)
+# - no Unicode support for AtomicParsley on Windows (Python bug)
 
 import re, os, sys, math, datetime, subprocess, urllib, tempfile, glob
 import shutil, codecs, StringIO, time, optparse, unicodedata, logging
@@ -448,7 +445,7 @@ def _add_option(opts, key, val):
         key = match.group(1)
     if key in ['tmp', 'video', 'audio', 'h264_rc', 'vp8_rc', 'preset',
                'h264_speed', 'vp8_speed', 'resolution']:
-        if val == '' or not val:
+        if val == '' or not val or val.lower() == 'none':
             val = None
     if key in ['import_mythtv', 'ipod', 'webm', 'two_pass', 'auto_crop',
                'deinterlace', 'downmix_to_stereo', 'use_db_rating',
@@ -502,8 +499,9 @@ def _def_str(test, val):
 def _get_options(opts):
     'Uses optparse to obtain command-line options.'
     usage = 'usage: %prog [options] chanid time\n' + \
-        '  %prog [options] wtv-file'
-    version = '%prog 1.3'
+        '  %prog [options] wtv-file\n' + \
+        '  %prog [options] mp4-or-mkv-file'
+    version = '%prog 1.4'
     parser = optparse.OptionParser(usage = usage, version = version,
                                    formatter = optparse.TitledHelpFormatter())
     flopts = optparse.OptionGroup(parser, 'File options')
@@ -634,10 +632,18 @@ def _get_options(opts):
                       default = opts['auto_crop'], help = 'use ffmpeg\'s ' +
                       'cropdetect filter to remove black borders' +
                       _def_str(opts['auto_crop'], True))
+    viopts.add_option('--no-auto-crop', dest = 'auto_crop',
+                      action = 'store_false', default = opts['auto_crop'],
+                      help = 'do not use cropdetect, preserve borders' +
+                      _def_str(opts['auto_crop'], False))
     viopts.add_option('--deinterlace', dest = 'deinterlace',
                       action = 'store_true', default = opts['deinterlace'],
                       help = 'use ffmpeg\'s yadif filter to deinterlace ' +
                       'source video' + _def_str(opts['deinterlace'], True))
+    viopts.add_option('--no-deinterlace', dest = 'deinterlace',
+                      action = 'store_false', default = opts['deinterlace'],
+                      help = 'do not use deinterlace filter, preserve ' +
+                      'source frames' + _def_str(opts['deinterlace'], False))
     parser.add_option_group(viopts)
     auopts = optparse.OptionGroup(parser, 'Audio encoding options')
     auopts.add_option('--aac-encoder', dest = 'aac_encoder', metavar = 'ENC',
