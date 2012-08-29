@@ -413,10 +413,10 @@ def _get_defaults():
             'h264_rc' : None, 'vp8_rc' : 'vbr', 'video_br' : 1920,
             'video_crf' : 23, 'preset' : None, 'h264_speed' : 'slow',
             'vp8_speed' : '0', 'threads' : 0, 'resolution' : None,
-            'aac_encoder' : 'nero', 'audio_q' : 0.55, 'audio_br' : 192,
-            'downmix_to_stereo' : False, 'use_db_rating' : True,
-            'use_db_descriptions' : False, 'quiet' : False,
-            'verbose' : False, 'clip_thresh' : 5,
+            'auto_crop' : True, 'deinterlace' : True, 'aac_encoder' : 'nero',
+            'audio_q' : 0.55, 'audio_br' : 192, 'downmix_to_stereo' : False,
+            'use_db_rating' : True, 'use_db_descriptions' : False,
+            'quiet' : False, 'verbose' : False, 'clip_thresh' : 5,
             'projectx' : 'project-x/ProjectX.jar',
             'remuxtool' : 'remuxTool.jar' }
     opts['.movie'] = {'format' : '%T'}
@@ -450,8 +450,8 @@ def _add_option(opts, key, val):
                'h264_speed', 'vp8_speed', 'resolution']:
         if val == '' or not val:
             val = None
-    if key in ['import_mythtv', 'ipod', 'webm', 'two_pass',
-               'downmix_to_stereo', 'use_db_rating',
+    if key in ['import_mythtv', 'ipod', 'webm', 'two_pass', 'auto_crop',
+               'deinterlace', 'downmix_to_stereo', 'use_db_rating',
                'use_db_descriptions', 'quiet', 'verbose']:
         val = val.lower()
         if val in ['1', 't', 'y', 'true', 'yes', 'on']:
@@ -630,6 +630,14 @@ def _get_options(opts):
                       metavar = 'RES', default = opts['resolution'],
                       help = 'target video resolution or aspect ratio ' +
                       '[default: %default]')
+    viopts.add_option('--auto-crop', dest = 'auto_crop', action = 'store_true',
+                      default = opts['auto_crop'], help = 'use ffmpeg\'s ' +
+                      'cropdetect filter to remove black borders' +
+                      _def_str(opts['auto_crop'], True))
+    viopts.add_option('--deinterlace', dest = 'deinterlace',
+                      action = 'store_true', default = opts['deinterlace'],
+                      help = 'use ffmpeg\'s yadif filter to deinterlace ' +
+                      'source video' + _def_str(opts['deinterlace'], True))
     parser.add_option_group(viopts)
     auopts = optparse.OptionGroup(parser, 'Audio encoding options')
     auopts.add_option('--aac-encoder', dest = 'aac_encoder', metavar = 'ENC',
@@ -1498,8 +1506,10 @@ class Transcoder:
         '''Adjusts the resolution of the transcoded video to be exactly the
         desired target resolution (if one is chosen), preserving aspect ratio
         by padding extra space with black pixels.'''
-        size = []
+        vf = []
         res = self.source.resolution
+        if self.opts.auto_crop:
+            res = self.source.crop[0]
         target = self.opts.resolution
         if target is not None:
             aspect = res[0] * 1.0 / res[1]
@@ -1508,20 +1518,20 @@ class Transcoder:
                 if vres % 2 == 1:
                     vres += 1
                 pad = (target[1] - vres) / 2
-                size = ['-s', '%dx%d' % (target[0], vres), '-vf',
-                        'pad=%d:%d:0:%d:black' % (target[0], target[1], pad)]
+                vf += ['scale=%d:%d' % (target[0], vres)]
+                vf += ['pad=%d:%d:0:%d:black' % (target[0], target[1], pad)]
             else:
                 hres = int(round(target[1] * aspect))
                 if hres % 2 == 1:
                     hres += 1
                 pad = (target[0] - hres) / 2
-                size = ['-s', '%dx%d' % (hres, target[1]), '-vf',
-                        'pad=%d:%d:%d:0:black' % (target[0], target[1], pad)]
-        return size
+                vf += ['scale=%d:%d' % (hres, target[1])]
+                vf += ['pad=%d:%d:%d:0:black' % (target[0], target[1], pad)]
+        return vf
     
     def encode_video(self):
         'Invokes ffmpeg to transcode the video stream to H.264 or VP8.'
-        preset, threads, rate, speed = [], [], [], []
+        preset, threads, rate, speed, vf = [], [], [], [], []
         fmt, codec = '', ''
         if self.opts.preset:
             preset = ['-vpre', self.opts.preset]
@@ -1548,11 +1558,19 @@ class Transcoder:
                 speed = ['-preset', self.opts.h264_speed]
         if self.opts.threads is not None:
             threads = ['-threads', self.opts.threads]
+        if self.opts.auto_crop:
+            hres, vres = self.source.crop[0]
+            x, y = self.source.crop[1]
+            vf += ['crop=%d:%d:%d:%d' % (hres, vres, x, y)]
+        if self.opts.deinterlace:
+            vf += ['yadif']
         _clean(self.video)
-        size = self._adjust_res()
+        vf += self._adjust_res()
         common = ['ffmpeg', '-y', '-i', self._demux_v, '-vcodec', codec,
                   '-an', '-f', fmt]
-        common += preset + rate + speed + size + threads
+        common += preset + rate + speed + threads
+        if len(vf) > 0:
+            common += ['-vf', ','.join(vf)]
         if self.opts.two_pass:
             logging.info(u'*** Encoding video to %s - first pass ***' %
                          self.opts.tmp)
@@ -1777,6 +1795,7 @@ class Source(dict):
     meta_present = False
     split_args = None
     job = None
+    crop = None
     
     def __repr__(self):
         season = int(self.get('season', 0))
@@ -1893,11 +1912,58 @@ class Source(dict):
         self._check_split_args()
         return fps, resolution, duration, vstreams, astreams
     
+    def _auto_crop(self):
+        '''Uses ffmpeg to detect black borders in order to automatically
+        set an optimal crop window which eliminates them.'''
+        aspects = [4. / 3, 16. / 9, 2.35]
+        logging.info('*** Determining optimal crop window ***')
+        if self.cutlist is None:
+            cut = (0, 60)
+        elif self.cutlist[0][0] > self.opts.clip_thresh:
+            cut = (0, cutlist[0][1])
+        else:
+            cut = (self.cutlist[0][1], self.cutlist[1][0])
+        args = ['ffmpeg', '-y', '-i', self.orig, '-ss', str(cut[0]),
+                '-t', str(cut[1] - cut[0]), '-vf', 'cropdetect=%d' % 96,
+                '-an', '-f', 'mpegts']
+        args += [os.devnull]
+        if len(self.split_args) > 1:
+            args += self.split_args[1]
+        proc = subprocess.Popen(args, stdout = subprocess.PIPE,
+                                stderr = subprocess.STDOUT)
+        logging.debug('$ %s' % u' '.join(args))
+        regex = re.compile('crop=(\d+):(\d+):(\d+):(\d+)')
+        for line in proc.stdout:
+            match = re.search(regex, line)
+            if match:
+                res = (match.group(1), match.group(2))
+                pos = (match.group(3), match.group(4))
+                self.crop = (res, pos)
+        if self.crop is not None:
+            aspect = int(self.crop[0][0]) * 1.0 / int(self.crop[0][1])
+            closest = 0.01
+            for val in aspects:
+                if abs(aspect - val) < abs(aspect - closest):
+                    closest = val
+            if closest < 1:
+                vres = self.resolution[1]
+                hres = int(round(vres * closest))
+                x = int(round((self.resolution[0] - hres) / 2))
+                self.crop = ((hres, vres), (x, 0))
+            else:
+                hres = self.resolution[0]
+                vres = int(round(hres / closest))
+                y = int(round((self.resolution[1] - vres) / 2))
+                self.crop = ((hres, vres), (0, y))
+    
     def parse_resolution(self, res):
         '''Translates the user-specified target resolution string into a
         width/height tuple using predefined resolution names like '1080p',
         or aspect ratios like '4:3', and so on.'''
-        if res:
+        sres = self.resolution
+        if self.opts.auto_crop:
+            sres = self.crop[0]
+        if res and res.lower() != 'none':
             predefined = {'480p' : (640, 480), '480p60' : (720, 480),
                           '720p' : (1280, 720), '1080p' : (1920, 1080)}
             for key, val in predefined.iteritems():
@@ -1909,11 +1975,11 @@ class Source(dict):
             match = re.match('(\d+):(\d+)', res)
             if match:
                 aspect = float(match.group(1)) / float(match.group(2))
-                h = self.resolution[1]
+                h = sres[1]
                 w = int(round(h * aspect))
                 return (w, h)
             if res == 'close' or res == 'closest':
-                (w, h) = self.resolution
+                (w, h) = sres
                 aspect = w * 1.0 / h
                 closest = (-1920, -1080)
                 for val in predefined.itervalues():
@@ -2044,7 +2110,6 @@ class Source(dict):
         title = re.sub('-', '\\-', self.get('title'))
         if type(title) is unicode:
             title = title.encode('utf_8')
-        print title
         results = tmdb3.searchMovie(title)
         if len(results) == 0:
             return None
@@ -2176,6 +2241,8 @@ class Source(dict):
         enc = '  Video options:'
         if self.opts.preset:
             enc += ' preset \'%s\',' % self.opts.preset
+        if self.opts.auto_crop and self.crop is not None:
+            enc += ' crop: %dx%d,' % self.crop[0]
         if self.opts.resolution:
             enc += ' resolution %dx%d,' % self.opts.resolution
         if self.opts.video == 'h264':
@@ -2359,6 +2426,10 @@ class MythSource(Source):
             val = self.prog.get(key)
             if val is not None:
                 self[key] = val
+        if self.prog.get('category_type') == 'movie':
+            self.movie = True
+        else:
+            self.movie = False
         if self.rec.get('originalairdate') is None: # MythTV bug
             self.rec['originalairdate'] = self.time
         for item in self.rating:
@@ -2388,8 +2459,10 @@ class MythSource(Source):
          self.vstreams, self.astreams) = self.video_params()
         if not self.fps or not self.resolution or not self.duration:
             raise RuntimeError('Could not determine video parameters.')
-        self.opts.resolution = self.parse_resolution(self.opts.resolution)
         self._cut_list()
+        if self.opts.auto_crop:
+            self._auto_crop()
+        self.opts.resolution = self.parse_resolution(self.opts.resolution)
     
     def _clean_cutlist(self):
         '''Removes commercial-skip and cut marks from the cutlist.
@@ -2568,8 +2641,10 @@ class WTVSource(Source):
          self.vstreams, self.astreams) = self.video_params()
         if not self.fps or not self.resolution or not self.duration:
             raise RuntimeError('Could not determine video parameters.')
-        self.opts.resolution = self.parse_resolution(self.opts.resolution)
         self._cut_list()
+        if self.opts.auto_crop:
+            self._auto_crop()
+        self.opts.resolution = self.parse_resolution(self.opts.resolution)
 
 class MP4Source(Source):
     '''Fetches Tvdb / TMDb metadata for an existing MPEG-4 or Matroska
