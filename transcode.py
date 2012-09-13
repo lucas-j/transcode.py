@@ -1514,7 +1514,7 @@ class Transcoder:
         by padding extra space with black pixels.'''
         vf = []
         res = self.source.resolution
-        if self.opts.auto_crop:
+        if self.opts.auto_crop and self.source.crop is not None:
             res = self.source.crop[0]
         target = self.opts.resolution
         if target is not None:
@@ -1564,7 +1564,7 @@ class Transcoder:
                 speed = ['-preset', self.opts.h264_speed]
         if self.opts.threads is not None:
             threads = ['-threads', self.opts.threads]
-        if self.opts.auto_crop:
+        if self.opts.auto_crop and self.source.crop is not None:
             hres, vres = self.source.crop[0]
             x, y = self.source.crop[1]
             vf += ['crop=%d:%d:%d:%d' % (hres, vres, x, y)]
@@ -1922,8 +1922,9 @@ class Source(dict):
         '''Uses ffmpeg to detect black borders in order to automatically
         set an optimal crop window which eliminates them.'''
         aspects = [4. / 3, 16. / 9, 2.35]
+        aspects += [self.resolution[0] * 1.0 / self.resolution[1]]
         logging.info('*** Determining optimal crop window ***')
-        if self.cutlist is None:
+        if self.cutlist is None or len(self.cutlist) == 0:
             cut = (0, 60)
         elif self.cutlist[0][0] > self.opts.clip_thresh:
             cut = (0, cutlist[0][1])
@@ -1961,13 +1962,21 @@ class Source(dict):
                 vres = int(round(hres / closest))
                 y = int(round((self.resolution[1] - vres) / 2))
                 self.crop = ((hres, vres), (0, y))
+            if self.crop[0][0] > self.resolution[0]:
+                self.crop = ((self.resolution[0], self.crop[0][1]),
+                             self.crop[1])
+            if self.crop[0][1] > self.resolution[1]:
+                self.crop = ((self.crop[0][0], self.resolution[1]),
+                             self.crop[1])
+            if self.crop[0] == self.resolution:
+                self.crop = None
     
     def parse_resolution(self, res):
         '''Translates the user-specified target resolution string into a
         width/height tuple using predefined resolution names like '1080p',
         or aspect ratios like '4:3', and so on.'''
         sres = self.resolution
-        if self.opts.auto_crop:
+        if self.opts.auto_crop and self.crop is not None:
             sres = self.crop[0]
         if res and res.lower() != 'none':
             predefined = {'480p' : (640, 480), '480p60' : (720, 480),
@@ -2338,6 +2347,7 @@ class MythSource(Source):
     metadata and a commercial-skip cutlist.'''
     prog = None
     db = None
+    index = []
     
     class _Rating(MythTV.DBDataRef):
         'Query for the content rating within the MythTV database.'
@@ -2385,25 +2395,56 @@ class MythSource(Source):
                         'SecurityPin' : opts.pin}
         self.db = MythTV.MythDB(**self.db_info)
     
+    def _build_index(self):
+        '''Uses ffprobe to build a frame index for the video file in
+        order to easily determine the amount of time elapsed by any
+        given number of frames.'''
+        self.index = []
+        frames, prev, time = 0, 0.0, 0.0
+        args = ['ffprobe', '-print_format', 'compact',
+                '-show_frames', self.orig]
+        with open(os.devnull, 'w') as devnull:
+            proc = subprocess.Popen(args, stdout = subprocess.PIPE,
+                                    stderr = devnull)
+            logging.debug('$ %s' % u' '.join(args))
+            videoRE = re.compile('media_type=video')
+            ptsRE = re.compile('pkt_pts_time=([0-9.]+)')
+            video_index, pts_index = -1, -1
+            for line in proc.stdout:
+                tokens = line.split('|')
+                if video_index < 0:
+                    for count, token in zip(range(len(tokens)), tokens):
+                        if re.search('media_type', token):
+                            video_index = count
+                            break
+                if pts_index < 0:
+                    for count, token in zip(range(len(tokens)), tokens):
+                        if re.search(ptsRE, token):
+                            pts_index = count
+                            break
+                if re.search(videoRE, tokens[video_index]):
+                    match = re.search(ptsRE, tokens[pts_index])
+                    if match is None:
+                        raise RuntimeError('Could not find PTS for + '
+                                           'frame %d.' % frames)
+                    pts = float(match.group(1))
+                    self.index += [time]
+                    frames += 1
+                    if prev != 0:
+                        time += pts - prev
+                    prev = pts
+    
     def _frame_to_timecode(self, frame):
-        '''Uses ffmpeg to remux a given number of frames in the video file
-        in order to determine the amount of time elapsed by those frames.'''
-        time = 0
-        args = ['ffmpeg', '-y', '-i', self.orig, '-vframes',
-                str(frame)] + self.split_args[0]
-        args += [os.devnull]
-        if len(self.split_args) > 1:
-            args += self.split_args[1]
-        proc = subprocess.Popen(args, stdout = subprocess.PIPE,
-                                stderr = subprocess.STDOUT)
-        logging.debug('$ %s' % u' '.join(args))
-        regex = re.compile('time=(\d\d):(\d\d):(\d\d\.\d\d)(?!.*time)')
-        for line in proc.stdout:
-            match = re.search(regex, line)
-            if match:
-                time = 3600 * int(match.group(1)) + 60 * int(match.group(2))
-                time += float(match.group(3))
-        return time
+        '''Uses the previously generated frame index for the video file to
+        obtain the amount of elapsed time corresponding to a given
+        frame number within the video.'''
+        if self.index is None or len(self.index) == 0:
+            self._build_index()
+        if frame < 0:
+            frame = 0
+        if frame >= len(self.index):
+            frame = len(self.index) - 1
+        return self.index[frame]
     
     def _cut_list(self):
         'Obtains the MythTV commercial-skip cutlist from the database.'
