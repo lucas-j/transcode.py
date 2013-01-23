@@ -124,7 +124,7 @@ import re, os, sys, math, datetime, subprocess, urllib, tempfile, glob
 import shutil, codecs, StringIO, time, optparse, unicodedata, logging
 import xml.dom.minidom
 import MythTV, MythTV.ttvdb.tvdb_api, MythTV.ttvdb.tvdb_exceptions
-import tmdb3.tmdb_api, tmdb3.tmdb_exceptions
+import MythTV.tmdb3.tmdb_api, MythTV.tmdb3.tmdb_exceptions
 
 def _clean(filename):
     'Removes the file if it exists.'
@@ -235,12 +235,12 @@ def _sanitize(filename, repl = None):
             out += repl
     if os.name == 'nt':
         out = out.replace('"', "'")
-        reserved = ['con', 'prn', 'aux', 'nul']
-        reserved += ['com%d' % d for d in range(0, 10)]
-        reserved += ['lpt%d' % d for d in range(0, 10)]
-        for r in reserved:
-            regex = re.compile(r, re.IGNORECASE)
-            out = regex.sub(repl, out)
+        #reserved = ['con:', 'prn:', 'aux:', 'nul:']
+        #reserved += ['com%d:' % d for d in range(0, 10)]
+        #reserved += ['lpt%d:' % d for d in range(0, 10)]
+        #for r in reserved:
+        #    regex = re.compile(r, re.IGNORECASE)
+        #    out = regex.sub(repl, out)
     return out
 
 def _filter_xml(data):
@@ -1850,9 +1850,10 @@ class Source(dict):
         if cn is not None:
             cn = cn.upper()
         cache = os.path.join(tempfile.gettempdir(), 'tmdb3.cache')
-        tmdb3.set_cache(engine = 'null')
-        tmdb3.set_key(self.api_key)
-        tmdb3.set_locale(language = ln, country = cn, fallthrough = 'en')
+        MythTV.tmdb3.set_cache(engine = 'null')
+        MythTV.tmdb3.set_key(self.api_key)
+        MythTV.tmdb3.set_locale(language = ln, country = cn,
+                                fallthrough = 'en')
     
     def _check_split_args(self):
         '''Determines the arguments to pass to FFmpeg when copying video data
@@ -2125,7 +2126,7 @@ class Source(dict):
         title = re.sub('-', '\\-', self.get('title'))
         if type(title) is unicode:
             title = title.encode('utf_8')
-        results = tmdb3.searchMovie(title)
+        results = MythTV.tmdb3.searchMovie(title)
         if len(results) == 0:
             return None
         airdate = self.get('originalairdate')
@@ -2187,7 +2188,7 @@ class Source(dict):
                 except IOError:
                     logging.warning('*** Unable to download movie poster ***')
             self._add_tmdb_credits(movie)
-        except tmdb3.tmdb_exceptions.TMDBError:
+        except MythTV.tmdb3.tmdb_exceptions.TMDBError:
             logging.warning('*** Unable to fetch TMDb listings for movie ***')
     
     def fetch_database(self):
@@ -2731,11 +2732,11 @@ class MP4Source(Source):
         title = re.sub('-', '\\-', title)
         try:
             if re.search('\((\d\d\d\d)\)', title):
-                movies = tmdb3.searchMovieWithYear(title)
+                movies = MythTV.tmdb3.searchMovieWithYear(title)
                 title = re.sub('\(\d\d\d\d\)', '', title).strip()
             else:
-                movies = tmdb3.searchMovie(title)
-        except tmdb3.tmdb_exceptions.TMDBError:
+                movies = MythTV.tmdb3.searchMovie(title)
+        except MythTV.tmdb3.tmdb_exceptions.TMDBError:
             return None
         for m in movies:
             t = m.title
