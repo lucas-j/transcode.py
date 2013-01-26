@@ -799,6 +799,8 @@ class Subtitles:
         these captions. To compensate for this, any captions which
         extend longer than the cutpoint are clipped, and the difference is
         subtracted from the rest of the captions.'''
+        if not self.enabled:
+            return
         if len(self.marks) == 0:
             return
         delay = 0.0
@@ -848,7 +850,10 @@ class MKVSubtitles(Subtitles):
     def write(self):
         '''Returns command-line arguments for mkvmerge to embed the SRT
         subtitles into a MKV file.'''
-        return ['--track-name', '0:Subtitles', self.srt]
+        if self.enabled:
+            return ['--track-name', '0:Subtitles', self.srt]
+        else:
+            return []
 
 class MP4Chapters:
     'Creates iOS-style chapter markers between designated cutpoints.'
@@ -1429,7 +1434,7 @@ class Transcoder:
                 match = re.search('\]\(([A-Za-z]+)\)', line)
                 if match:
                     if match.group(1) == _iso_639_2(self.opts.language):
-                        logging.debug('Found audio stream 0x%s' %
+                        logging.debug('Found audio stream %s' %
                                       match.group(1))
                         enabled = True
                 astreams += [(pid, enabled)]
@@ -1855,11 +1860,44 @@ class Source(dict):
         MythTV.tmdb3.set_locale(language = ln, country = cn,
                                 fallthrough = 'en')
     
+    def _find_broken(self):
+        '''Determines whether the original video file includes an invalid
+        audio or video stream which cannot be copied, and if so, returns
+        arguments to ffmpeg which avoids copying these streams.'''
+        audioMap = ['-map', '0:a']
+        videoRE = re.compile('Stream #\d+:\d+\[0x[0-9a-fA-F]+\].*:\s*Video')
+        audioRE = re.compile('Stream #\d+:(\d+)\[0x[0-9a-fA-F]+\].*:\s*Audio')
+        args = ['ffmpeg', '-y', '-i', self.orig, '-t', '5', '-map', '0:v',
+                '-map', '0:a', '-c', 'copy', '-f', 'mpegts', os.devnull]
+        proc = subprocess.Popen(args, stdout = subprocess.PIPE,
+                                stderr = subprocess.STDOUT)
+        vStreams = 0
+        disabled = False
+        enabled = []
+        for line in proc.stdout:
+            match = re.search(videoRE, line)
+            if match:
+                vStreams += 1
+            match = re.search(audioRE, line)
+            if match:
+                stream = int(match.group(1)) - vStreams
+                if re.search('0 channels', line):
+                    logging.debug('Audio stream %d is invalid' % stream)
+                    disabled = True
+                else:
+                    enabled += [stream]
+        if disabled:
+            audioMap = []
+            for stream in enabled:
+                audioMap += ['-map', '0:a:%d' % stream]
+        return audioMap
+    
     def _check_split_args(self):
         '''Determines the arguments to pass to FFmpeg when copying video data
         during splits or frame queries. Versions 0.7 and older use -newaudio /
         -newvideo tags for each additional stream present. Versions 0.8 and
         newer use -map 0:v -map 0:a to automatically copy over all streams.'''
+        audioMap = self._find_broken()
         has_c = _ver(['ffmpeg', '-help'], '^(-c codec)')
         if not has_c:
             args = [['-acodec', 'copy', '-vcodec', 'copy',
@@ -1869,7 +1907,7 @@ class Source(dict):
             for vstream in xrange(1, self.vstreams):
                 args += [['-vcodec', 'copy', '-newvideo']]
         else:
-            args = [['-map', '0:v', '-map', '0:a', '-c', 'copy',
+            args = [['-map', '0:v'] + audioMap + ['-c', 'copy',
                      '-f', 'mpegts']]
         self.split_args = args
     
