@@ -418,7 +418,7 @@ def _get_defaults():
             'remuxtool' : 'remuxTool.jar' }
     opts['.movie'] = {'format' : '%T'}
     opts['.mp4'] = {'video' : 'h264', 'audio' : 'aac'}
-    opts['.mkv'] = {'video' : 'vp8', 'audio' : 'vorbis'}
+    opts['.mkv'] = {}#{'video' : 'vp8', 'audio' : 'vorbis'}
     opts['.one_pass'] = {'h264_rc' : 'crf'}
     opts['.two_pass'] = {'h264_rc' : 'cbr'}
     opts['.ipod'] = {'container' : 'mp4', 'video' : 'h264', 'audio' : 'aac',
@@ -1072,7 +1072,7 @@ class MP4Metadata:
         'Adds single-argument or standalone tags into the MP4 file.'
         s = self.source
         if s.get('movie') is True:
-            args = ['--stik', 'Movie', '--encodingTool', version]
+            args = ['--stik', 'Short Film', '--encodingTool', version]
         else:
             args = ['--stik', 'TV Show', '--encodingTool', version]
         if type(s) == WTVSource:
@@ -1723,7 +1723,7 @@ class MKVTranscoder(Transcoder):
         common = ['--no-chapters', '-B', '-T', '-M', '--no-global-tags']
         args = ['mkvmerge']
         args += ['--default-language', _iso_639_2(self.opts.language)]
-        args += common + ['-A', '-S', '--track-name', '1:Video', self.video]
+        args += common + ['-A', '-S', '--track-name', '0:Video', self.video]
         args += common + ['-D', '-S', '--track-name', '0:Audio', self.audio]
         subs = self.subtitles.write()
         if len(subs) > 0:
@@ -1966,7 +1966,7 @@ class Source(dict):
         if self.cutlist is None or len(self.cutlist) == 0:
             cut = (0, 60)
         elif self.cutlist[0][0] > self.opts.clip_thresh:
-            cut = (0, cutlist[0][1])
+            cut = (0, self.cutlist[0][1])
         else:
             cut = (self.cutlist[0][1], self.cutlist[1][0])
         args = ['ffmpeg', '-y', '-i', self.orig, '-ss', str(cut[0]),
@@ -2162,6 +2162,7 @@ class Source(dict):
     def _fetch_movie(self):
         'Attempts to find the movie in TMDb.'
         title = re.sub('-', '\\-', self.get('title'))
+        title = re.sub('\\?', '\\?', self.get('title'))
         if type(title) is unicode:
             title = title.encode('utf_8')
         results = MythTV.tmdb3.searchMovie(title)
@@ -2831,7 +2832,7 @@ class MP4Source(Source):
                     break
             if not self.meta_present:
                 raise ValueError('Could not find match for %s.' % title)
-            titles += title
+            titles += [title]
             for t in titles:
                 ep = self._check_episode(show, t)
                 if ep is not None:
